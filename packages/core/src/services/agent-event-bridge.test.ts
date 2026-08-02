@@ -341,6 +341,83 @@ describe("agent-event-bridge", () => {
 		expect(notificationService.list()).toHaveLength(0);
 	});
 
+	it("does not create inbox notifications for programmatic API / internal sources", async () => {
+		const { runtime, events, notificationService } = await createCtx();
+		// REST `POST /agents/:id/message` (the LP3 "New API message" spam source,
+		// including bench-harness traffic).
+		await bridgeMessageReceivedToStreams(
+			messagePayload(runtime, {
+				source: "agent_message_api",
+				message: {
+					...messagePayload(runtime).message,
+					content: {
+						text: "bench bench 3: reply with one short sentence",
+						source: "agent_message_api",
+						channelType: "API",
+					},
+				},
+			} as Partial<MessagePayload>),
+		);
+		// OpenAI-compat `/v1/chat/completions`.
+		await bridgeMessageReceivedToStreams(
+			messagePayload(runtime, {
+				source: "compat_openai",
+				message: {
+					...messagePayload(runtime).message,
+					content: {
+						text: "compat prompt",
+						source: "compat_openai",
+						channelType: "API",
+					},
+				},
+			} as Partial<MessagePayload>),
+		);
+		// A caller-chosen `platformName` becomes an arbitrary source label, but
+		// the API route still stamps channelType API — the channel classifies it.
+		await bridgeMessageReceivedToStreams(
+			messagePayload(runtime, {
+				source: "my-custom-bot",
+				message: {
+					...messagePayload(runtime).message,
+					content: {
+						text: "custom platform prompt",
+						source: "my-custom-bot",
+						channelType: "API",
+					},
+				},
+			} as Partial<MessagePayload>),
+		);
+		// The runtime talking to itself: scheduled trigger wake-up prompt.
+		await bridgeMessageReceivedToStreams(
+			messagePayload(runtime, {
+				source: "trigger-prompt",
+				message: {
+					...messagePayload(runtime).message,
+					content: {
+						text: 'Scheduled trigger "hydrate" fired. Do this now: drink water',
+						source: "trigger-prompt",
+					},
+				},
+			} as Partial<MessagePayload>),
+		);
+
+		// All four still light up the activity stream (the WS chat indicator)…
+		expect(events.filter((e) => e.stream === "message")).toHaveLength(4);
+		// …but none of them is a user-facing notification.
+		if (!notificationService) throw new Error("NotificationService not loaded");
+		expect(notificationService.list()).toHaveLength(0);
+	});
+
+	it("still notifies for real human connector traffic (Discord DM)", async () => {
+		const { runtime, notificationService } = await createCtx();
+		await bridgeMessageReceivedToStreams(messagePayload(runtime));
+		if (!notificationService) throw new Error("NotificationService not loaded");
+		expect(notificationService.list()).toHaveLength(1);
+		expect(notificationService.list()[0]?.title).toBe(
+			"New discord message from alice",
+		);
+	});
+
 	it("bridges raw connector message events that lack canonical Memory payloads", async () => {
 		expect(CONNECTOR_MESSAGE_RECEIVED_EVENT_TYPES).toContain(
 			"TWITCH_MESSAGE_RECEIVED",

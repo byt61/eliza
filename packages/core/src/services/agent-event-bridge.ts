@@ -28,9 +28,16 @@ import type {
 	RunEventPayload,
 } from "../types/events.ts";
 import type { IAgentRuntime } from "../types/index.ts";
-import { MESSAGE_SOURCE_CLIENT_CHAT } from "../types/message-source.ts";
+import {
+	MESSAGE_SOURCE_AGENT_GREETING,
+	MESSAGE_SOURCE_CLIENT_CHAT,
+	MESSAGE_SOURCE_CODING_AGENT,
+	MESSAGE_SOURCE_SUB_AGENT,
+	MESSAGE_SOURCE_TRIGGER_PROMPT,
+} from "../types/message-source.ts";
 import type { NotificationInput } from "../types/notification.ts";
 import type { JsonValue } from "../types/primitives.ts";
+import { ChannelType } from "../types/primitives.ts";
 import { ServiceType } from "../types/service.ts";
 import type { AgentEventService } from "./agentEvent.ts";
 
@@ -263,19 +270,58 @@ function isBotMessage(metadata: Record<string, unknown>): boolean {
 	);
 }
 
+/**
+ * Sources that are NOT a human reaching the agent from an third-party surface, so
+ * an inbound message from them must never mint a user-facing notification:
+ *
+ *   - `client_chat` / `web` / `message` / `messageservice` — the user's own
+ *     local dashboard chat (they are already looking at the reply).
+ *   - `api` / `agent_message_api` / `compat_openai` / `compat_anthropic` —
+ *     programmatic REST/compat callers (`POST /agents/:id/message`,
+ *     `/v1/chat/completions`, `/v1/messages`). This is machine-to-machine
+ *     traffic — integration tests, bench harnesses, other services — not a
+ *     person the user needs to be interrupted about. On the LP3 home screen
+ *     these surfaced as "New API message" cards carrying bench prompts
+ *     ("bench bench 3: reply with one short sentence") and stacked into
+ *     "Show all 27 Agent Message Api notifications".
+ *   - `trigger-prompt` / `sub_agent` / `coding-agent` / `agent_greeting` —
+ *     the runtime talking to ITSELF (scheduled trigger wake-ups, sub-agent
+ *     relays, greetings). Trigger *outcomes* already notify deliberately on
+ *     the workflow rail (triggers/runtime.ts, #10697); the synthetic inbound
+ *     prompt must not double-notify as a fake "message".
+ */
+const NON_NOTIFYING_MESSAGE_SOURCES: ReadonlySet<string> = new Set(
+	[
+		MESSAGE_SOURCE_CLIENT_CHAT,
+		MESSAGE_SOURCE_SUB_AGENT,
+		MESSAGE_SOURCE_CODING_AGENT,
+		MESSAGE_SOURCE_AGENT_GREETING,
+		MESSAGE_SOURCE_TRIGGER_PROMPT,
+		"api",
+		"web",
+		"message",
+		"messageservice",
+		"agent_message_api",
+		"compat_openai",
+		"compat_anthropic",
+	].map((value) => value.toLowerCase()),
+);
+
 function shouldNotifyForInboundMessage(
 	payload: MessagePayload,
 	source: string,
 ): boolean {
 	const metadata = messageMetadata(payload);
 	const normalizedSource = source.toLowerCase();
-	if (
-		normalizedSource === MESSAGE_SOURCE_CLIENT_CHAT ||
-		normalizedSource === "api" ||
-		normalizedSource === "web" ||
-		normalizedSource === "message" ||
-		normalizedSource === "messageservice"
-	) {
+	if (NON_NOTIFYING_MESSAGE_SOURCES.has(normalizedSource)) {
+		return false;
+	}
+	// The API routes stamp `channelType: API` on every message they mint —
+	// including ones minted with a caller-chosen `platformName` that becomes an
+	// arbitrary `content.source`. Classify by the channel the message actually
+	// arrived on, not just the spoofable source label: API-channel traffic is
+	// programmatic and never a user-facing "new message".
+	if (payload.message.content.channelType === ChannelType.API) {
 		return false;
 	}
 	if (payload.message.entityId === payload.runtime.agentId) {
