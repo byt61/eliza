@@ -50,6 +50,7 @@ interface MockRuntimeHandle {
     result: { ok: true; executionId?: string } | { ok: false; error: string },
   ) => void;
   setWorkflowServicePresent: (present: boolean) => void;
+  setRuntimeSetting: (name: string, value: unknown) => void;
 }
 
 function makeRuntime(): MockRuntimeHandle {
@@ -89,6 +90,7 @@ function makeRuntime(): MockRuntimeHandle {
     error?: string;
   } = { ok: true, executionId: "exec-1" };
   let workflowServicePresent = true;
+  const runtimeSettings = new Map<string, unknown>();
 
   const workflowService = {
     async execute(
@@ -119,6 +121,7 @@ function makeRuntime(): MockRuntimeHandle {
       if (name === ServiceType.NOTIFICATION) return notificationService;
       return null;
     },
+    getSetting: (name: string) => runtimeSettings.get(name),
     deleteTask: vi.fn(async (id: UUID) => {
       deletedTaskIds.push(id);
     }),
@@ -142,6 +145,9 @@ function makeRuntime(): MockRuntimeHandle {
     },
     setWorkflowServicePresent: (present) => {
       workflowServicePresent = present;
+    },
+    setRuntimeSetting: (name, value) => {
+      runtimeSettings.set(name, value);
     },
   };
 }
@@ -204,11 +210,13 @@ describe("executeTriggerTask", () => {
   let handle: MockRuntimeHandle;
 
   beforeEach(() => {
+    delete process.env.ELIZA_DEBUG_TRIGGER_NOTIFICATIONS;
     handle = makeRuntime();
     taskSeq = 0;
   });
 
   afterEach(() => {
+    delete process.env.ELIZA_DEBUG_TRIGGER_NOTIFICATIONS;
     vi.restoreAllMocks();
   });
 
@@ -237,7 +245,29 @@ describe("executeTriggerTask", () => {
     expect(persisted?.lastStatus).toBe("success");
   });
 
-  it("emits a low-priority completion notification on a successful run (#10697)", async () => {
+  it("does not leak trigger outcomes into the user notification inbox by default", async () => {
+    const successfulTask = makeTriggerTask({
+      triggerType: "interval",
+      displayName: "System health check",
+    });
+    await executeTriggerTask(handle.runtime, successfulTask, {
+      source: "scheduler",
+    });
+
+    handle.setDispatchResult({ ok: false, error: "internal workflow failed" });
+    const failedTask = makeTriggerTask({
+      triggerType: "interval",
+      displayName: "System health check retry",
+    });
+    await executeTriggerTask(handle.runtime, failedTask, {
+      source: "scheduler",
+    });
+
+    expect(handle.notifyCalls).toHaveLength(0);
+  });
+
+  it("emits a low-priority completion notification only with the debug opt-in", async () => {
+    handle.setRuntimeSetting("ELIZA_DEBUG_TRIGGER_NOTIFICATIONS", true);
     const task = makeTriggerTask({
       triggerType: "interval",
       displayName: "Nightly backup",
@@ -256,7 +286,8 @@ describe("executeTriggerTask", () => {
     expect(notif.groupKey).toBe(`trigger:${task.id}`);
   });
 
-  it("emits a high-priority failure notification when the dispatch errors", async () => {
+  it("emits a high-priority failure notification only with the debug opt-in", async () => {
+    handle.setRuntimeSetting("ELIZA_DEBUG_TRIGGER_NOTIFICATIONS", "1");
     handle.setDispatchResult({ ok: false, error: "workflow blew up" });
     const task = makeTriggerTask({
       triggerType: "interval",

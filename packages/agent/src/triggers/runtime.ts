@@ -161,6 +161,23 @@ export function readTriggerRuns(task: Task): TriggerRunRecord[] {
   return Array.isArray(runs) ? (runs as TriggerRunRecord[]) : [];
 }
 
+export function triggerNotificationsEnabled(runtime?: IAgentRuntime): boolean {
+  const runtimeSetting = runtime?.getSetting(
+    "ELIZA_DEBUG_TRIGGER_NOTIFICATIONS",
+  );
+  if (
+    runtimeSetting === true ||
+    runtimeSetting === "true" ||
+    runtimeSetting === "1"
+  ) {
+    return true;
+  }
+  const env = process.env.ELIZA_DEBUG_TRIGGER_NOTIFICATIONS;
+  if (!env) return false;
+  const normalized = env.trim().toLowerCase();
+  return normalized === "1" || normalized === "true";
+}
+
 export function triggersFeatureEnabled(runtime?: IAgentRuntime): boolean {
   const runtimeSetting = runtime?.getSetting("ELIZA_TRIGGERS_ENABLED");
   if (
@@ -536,24 +553,28 @@ export async function executeTriggerTask(
       },
       "Trigger dispatch failed",
     );
-    // Scheduled automations run without the user in the chat loop, so a
-    // dispatch failure is otherwise invisible. Surface it on the notification
-    // rail (fire-and-forget; never let a notify failure mask the trigger error).
-    void getNotifier(runtime)
-      ?.notify({
-        title: `Automation "${trigger.displayName}" failed`,
-        body: errorMessage.slice(0, 200),
-        category: "workflow",
-        priority: "high",
-        source: "trigger",
-        groupKey: `trigger:${task.id ?? trigger.triggerId}`,
-        data: {
-          taskId: task.id,
-          triggerId: trigger.triggerId,
-          error: errorMessage,
-        },
-      })
-      .catch(() => {});
+    // Trigger runs are internal runtime traffic. Their durable status/error is
+    // already recorded on the trigger and surfaced by the Automations UI; a
+    // second notification leaks implementation activity into the user inbox
+    // (LP3 showed system health checks and "Trigger" stacks). Keep the old rail
+    // signal only as an explicit diagnostic opt-in.
+    if (triggerNotificationsEnabled(runtime)) {
+      void getNotifier(runtime)
+        ?.notify({
+          title: `Automation "${trigger.displayName}" failed`,
+          body: errorMessage.slice(0, 200),
+          category: "workflow",
+          priority: "high",
+          source: "trigger",
+          groupKey: `trigger:${task.id ?? trigger.triggerId}`,
+          data: {
+            taskId: task.id,
+            triggerId: trigger.triggerId,
+            error: errorMessage,
+          },
+        })
+        .catch(() => {});
+    }
   }
 
   if (status === "success") {
@@ -568,26 +589,24 @@ export async function executeTriggerTask(
       },
       `Trigger "${trigger.displayName}" executed successfully`,
     );
-    // Scheduled automations run without the user in the chat loop, so a
-    // successful completion is otherwise invisible — the rail only ever showed
-    // the failure path (#10697). Surface a low-priority "completed" so the user
-    // can see the agent finished the task. Grouped per trigger so a frequently
-    // scheduled automation updates ONE rail entry instead of spamming, and
-    // fire-and-forget so a notify failure never masks the successful run.
-    void getNotifier(runtime)
-      ?.notify({
-        title: `Automation "${trigger.displayName}" completed`,
-        category: "workflow",
-        priority: "low",
-        source: "trigger",
-        groupKey: `trigger:${task.id ?? trigger.triggerId}`,
-        data: {
-          taskId: task.id,
-          triggerId: trigger.triggerId,
-          workflowExecutionId,
-        },
-      })
-      .catch(() => {});
+    // Completion notifications are diagnostic-only for the same reason as
+    // failures above. The trigger run record is the production source of truth.
+    if (triggerNotificationsEnabled(runtime)) {
+      void getNotifier(runtime)
+        ?.notify({
+          title: `Automation "${trigger.displayName}" completed`,
+          category: "workflow",
+          priority: "low",
+          source: "trigger",
+          groupKey: `trigger:${task.id ?? trigger.triggerId}`,
+          data: {
+            taskId: task.id,
+            triggerId: trigger.triggerId,
+            workflowExecutionId,
+          },
+        })
+        .catch(() => {});
+    }
   }
 
   const finishedAt = Date.now();
