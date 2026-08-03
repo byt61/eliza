@@ -5,9 +5,9 @@
  * prompt automation (a synthetic-entity turn through the message service), then
  * records the run, recomputes next-fire metadata, deletes one-shot/exhausted
  * tasks, and hands the per-fire re-arm interval back so varying-cadence triggers
- * don't drift. Tracks per-agent execution metrics, surfaces success/failure on
- * the notification rail, and projects tasks into read-only trigger/heartbeat
- * summaries and a health snapshot for the API.
+ * don't drift. Tracks per-agent execution metrics, surfaces user-authored
+ * outcomes on the notification rail, and projects tasks into read-only
+ * trigger/heartbeat summaries and a health snapshot for the API.
  */
 import crypto from "node:crypto";
 import type {
@@ -91,11 +91,32 @@ interface NotificationEmitter {
   }) => Promise<unknown>;
 }
 
+function shouldNotifyForTriggerOutcome(
+  runtime: IAgentRuntime,
+  trigger: TriggerConfig,
+): boolean {
+  return (
+    trigger.notifyOnOutcome === true || triggerNotificationsEnabled(runtime)
+  );
+}
+
 function getNotifier(runtime: IAgentRuntime): NotificationEmitter | null {
   const svc = runtime.getService(
     ServiceType.NOTIFICATION,
   ) as NotificationEmitter | null;
   return svc && typeof svc.notify === "function" ? svc : null;
+}
+
+function reportTriggerNotificationError(
+  runtime: IAgentRuntime,
+  error: unknown,
+  context: Record<string, unknown>,
+): void {
+  runtime.reportError("TriggerRuntime.notification", error, {
+    src: "trigger-runtime",
+    agentId: runtime.agentId,
+    ...context,
+  });
 }
 
 const metricsByAgent = new Map<UUID, TriggerMetricsState>();
@@ -553,12 +574,7 @@ export async function executeTriggerTask(
       },
       "Trigger dispatch failed",
     );
-    // Trigger runs are internal runtime traffic. Their durable status/error is
-    // already recorded on the trigger and surfaced by the Automations UI; a
-    // second notification leaks implementation activity into the user inbox
-    // (LP3 showed system health checks and "Trigger" stacks). Keep the old rail
-    // signal only as an explicit diagnostic opt-in.
-    if (triggerNotificationsEnabled(runtime)) {
+    if (shouldNotifyForTriggerOutcome(runtime, trigger)) {
       void getNotifier(runtime)
         ?.notify({
           title: `Automation "${trigger.displayName}" failed`,
@@ -573,7 +589,16 @@ export async function executeTriggerTask(
             error: errorMessage,
           },
         })
-        .catch(() => {});
+        // error-policy:J5 unhandled-rejection suppression — notification write
+        // failure is observed through runtime.reportError, while trigger
+        // dispatch failure remains recorded in the trigger run metadata.
+        .catch((notifyError: unknown) =>
+          reportTriggerNotificationError(runtime, notifyError, {
+            taskId: task.id,
+            triggerId: trigger.triggerId,
+            outcome: "error",
+          }),
+        );
     }
   }
 
@@ -589,9 +614,7 @@ export async function executeTriggerTask(
       },
       `Trigger "${trigger.displayName}" executed successfully`,
     );
-    // Completion notifications are diagnostic-only for the same reason as
-    // failures above. The trigger run record is the production source of truth.
-    if (triggerNotificationsEnabled(runtime)) {
+    if (shouldNotifyForTriggerOutcome(runtime, trigger)) {
       void getNotifier(runtime)
         ?.notify({
           title: `Automation "${trigger.displayName}" completed`,
@@ -605,7 +628,16 @@ export async function executeTriggerTask(
             workflowExecutionId,
           },
         })
-        .catch(() => {});
+        // error-policy:J5 unhandled-rejection suppression — notification write
+        // failure is observed through runtime.reportError; a successful trigger
+        // run must not be turned into a failed dispatch by the inbox rail.
+        .catch((notifyError: unknown) =>
+          reportTriggerNotificationError(runtime, notifyError, {
+            taskId: task.id,
+            triggerId: trigger.triggerId,
+            outcome: "success",
+          }),
+        );
     }
   }
 

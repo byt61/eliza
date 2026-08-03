@@ -4,8 +4,9 @@
  * streams and guarded inbox notifications, including the no-service no-op path.
  * Runs through a real AgentRuntime with registered event and notification services.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCharacter } from "../character.ts";
+import { registerConnectorSourceMetadata } from "../connectors.ts";
 import { InMemoryDatabaseAdapter } from "../database/inMemoryAdapter.ts";
 import { AgentRuntime } from "../runtime.ts";
 import type { AgentEventPayload } from "../types/agentEvent.ts";
@@ -14,6 +15,8 @@ import type {
 	EvaluatorEventPayload,
 	MessagePayload,
 } from "../types/events.ts";
+import { EventType } from "../types/events.ts";
+import { ChannelType } from "../types/primitives.ts";
 import type { IAgentRuntime } from "../types/runtime.ts";
 import { ServiceType } from "../types/service.ts";
 import {
@@ -113,6 +116,7 @@ function messagePayload(
 			content: {
 				text: "Can you check this?",
 				source: "discord",
+				channelType: ChannelType.DM,
 				url: "https://discord.example/message/1",
 			},
 			metadata: {
@@ -123,6 +127,13 @@ function messagePayload(
 		},
 		...overrides,
 	} as unknown as MessagePayload;
+}
+
+async function emitMessageReceived(
+	runtime: AgentRuntime,
+	payload: MessagePayload,
+): Promise<void> {
+	await runtime.emitEvent(EventType.MESSAGE_RECEIVED, payload);
 }
 
 describe("agent-event-bridge", () => {
@@ -288,14 +299,14 @@ describe("agent-event-bridge", () => {
 
 	it("bridges MESSAGE_RECEIVED to activity plus a guarded connector notification", async () => {
 		const { runtime, events, notificationService } = await createCtx();
-		await bridgeMessageReceivedToStreams(messagePayload(runtime));
+		await emitMessageReceived(runtime, messagePayload(runtime));
 
 		const messageEvent = events.find((e) => e.stream === "message");
 		expect(messageEvent?.runId).toBe("44444444-4444-4444-4444-444444444444");
 		expect(messageEvent?.sessionKey).toBe("discord:room:1");
 		expect(messageEvent?.data).toMatchObject({
 			type: "received",
-			channel: "discord",
+			channel: ChannelType.DM,
 			userId: "55555555-5555-5555-5555-555555555555",
 			roomId: ROOM_ID,
 			content: "Can you check this?",
@@ -318,16 +329,22 @@ describe("agent-event-bridge", () => {
 
 	it("does not create inbox notifications for local client chat or self messages", async () => {
 		const { runtime, events, notificationService } = await createCtx();
-		await bridgeMessageReceivedToStreams(
+		await emitMessageReceived(
+			runtime,
 			messagePayload(runtime, {
 				source: "client_chat",
 				message: {
 					...messagePayload(runtime).message,
-					content: { text: "local prompt", source: "client_chat" },
+					content: {
+						text: "local prompt",
+						source: "client_chat",
+						channelType: ChannelType.DM,
+					},
 				},
 			} as Partial<MessagePayload>),
 		);
-		await bridgeMessageReceivedToStreams(
+		await emitMessageReceived(
+			runtime,
 			messagePayload(runtime, {
 				message: {
 					...messagePayload(runtime).message,
@@ -345,7 +362,8 @@ describe("agent-event-bridge", () => {
 		const { runtime, events, notificationService } = await createCtx();
 		// REST `POST /agents/:id/message` (the LP3 "New API message" spam source,
 		// including bench-harness traffic).
-		await bridgeMessageReceivedToStreams(
+		await emitMessageReceived(
+			runtime,
 			messagePayload(runtime, {
 				source: "agent_message_api",
 				message: {
@@ -359,7 +377,8 @@ describe("agent-event-bridge", () => {
 			} as Partial<MessagePayload>),
 		);
 		// OpenAI-compat `/v1/chat/completions`.
-		await bridgeMessageReceivedToStreams(
+		await emitMessageReceived(
+			runtime,
 			messagePayload(runtime, {
 				source: "compat_openai",
 				message: {
@@ -374,7 +393,8 @@ describe("agent-event-bridge", () => {
 		);
 		// A caller-chosen `platformName` becomes an arbitrary source label, but
 		// the API route still stamps channelType API — the channel classifies it.
-		await bridgeMessageReceivedToStreams(
+		await emitMessageReceived(
+			runtime,
 			messagePayload(runtime, {
 				source: "my-custom-bot",
 				message: {
@@ -388,7 +408,8 @@ describe("agent-event-bridge", () => {
 			} as Partial<MessagePayload>),
 		);
 		// The runtime talking to itself: scheduled trigger wake-up prompt.
-		await bridgeMessageReceivedToStreams(
+		await emitMessageReceived(
+			runtime,
 			messagePayload(runtime, {
 				source: "trigger-prompt",
 				message: {
@@ -408,14 +429,126 @@ describe("agent-event-bridge", () => {
 		expect(notificationService.list()).toHaveLength(0);
 	});
 
-	it("still notifies for real human connector traffic (Discord DM)", async () => {
+	it("fails closed unless both source and channel are trusted user-facing connector provenance", async () => {
 		const { runtime, notificationService } = await createCtx();
-		await bridgeMessageReceivedToStreams(messagePayload(runtime));
+		const cases: Array<Partial<MessagePayload>> = [
+			{
+				source: "unknown-connector",
+				message: {
+					...messagePayload(runtime).message,
+					content: {
+						text: "unknown source with a user-looking channel",
+						source: "unknown-connector",
+						channelType: ChannelType.DM,
+					},
+				},
+			} as Partial<MessagePayload>,
+			{
+				source: "discord",
+				message: {
+					...messagePayload(runtime).message,
+					content: {
+						text: "trusted source with internal channel",
+						source: "discord",
+						channelType: ChannelType.API,
+					},
+				},
+			} as Partial<MessagePayload>,
+			{
+				source: "discord",
+				message: {
+					...messagePayload(runtime).message,
+					content: {
+						text: "trusted source with missing channel",
+						source: "discord",
+					},
+				},
+			} as Partial<MessagePayload>,
+		];
+
+		for (const item of cases) {
+			await emitMessageReceived(runtime, messagePayload(runtime, item));
+		}
+
 		if (!notificationService) throw new Error("NotificationService not loaded");
-		expect(notificationService.list()).toHaveLength(1);
-		expect(notificationService.list()[0]?.title).toBe(
-			"New discord message from alice",
+		expect(notificationService.list()).toHaveLength(0);
+	});
+
+	it("notifies for trusted connector traffic and connector-registry extensions", async () => {
+		const { runtime, notificationService } = await createCtx();
+		await emitMessageReceived(runtime, messagePayload(runtime));
+
+		registerConnectorSourceMetadata("custom-gateway", {
+			aliases: ["custom-gateway"],
+			sourceKind: "active",
+		});
+		await emitMessageReceived(
+			runtime,
+			messagePayload(runtime, {
+				source: "custom-gateway",
+				message: {
+					...messagePayload(runtime).message,
+					roomId: "77777777-7777-7777-7777-777777777777",
+					content: {
+						text: "registered extension",
+						source: "custom-gateway",
+						channelType: ChannelType.DM,
+					},
+				},
+			} as Partial<MessagePayload>),
 		);
+
+		if (!notificationService) throw new Error("NotificationService not loaded");
+		const titles = notificationService.list().map((item) => item.title);
+		expect(titles).toHaveLength(2);
+		expect(titles).toContain("New discord message from alice");
+		expect(titles).toContain("New custom-gateway message from alice");
+	});
+
+	it("reports connector notification write failures through the runtime error boundary", async () => {
+		const { runtime, notificationService } = await createCtx();
+		if (!notificationService) throw new Error("NotificationService not loaded");
+		vi.spyOn(notificationService, "notify").mockRejectedValueOnce(
+			new Error("notification store unavailable"),
+		);
+		const reportError = vi.spyOn(runtime, "reportError");
+
+		await emitMessageReceived(runtime, messagePayload(runtime));
+
+		expect(reportError).toHaveBeenCalledWith(
+			"AgentEventBridge.inboundNotify",
+			expect.any(Error),
+			expect.objectContaining({
+				src: "agent-event-bridge",
+				source: "discord",
+				messageId: "44444444-4444-4444-4444-444444444444",
+			}),
+		);
+	});
+
+	it("coalesces repeated Discord DM bridge notifications into one inbox item", async () => {
+		const { runtime, notificationService } = await createCtx();
+		await emitMessageReceived(runtime, messagePayload(runtime));
+		await emitMessageReceived(
+			runtime,
+			messagePayload(runtime, {
+				message: {
+					...messagePayload(runtime).message,
+					id: "66666666-6666-6666-6666-666666666666",
+					content: {
+						text: "Retry payload should replace the same room group",
+						source: "discord",
+						channelType: ChannelType.DM,
+					},
+				},
+			} as Partial<MessagePayload>),
+		);
+
+		if (!notificationService) throw new Error("NotificationService not loaded");
+		const notifications = notificationService.list();
+		expect(notifications).toHaveLength(1);
+		expect(notifications[0]?.groupKey).toBe(`message:discord:${ROOM_ID}`);
+		expect(notifications[0]?.data?.count).toBe(2);
 	});
 
 	it("bridges raw connector message events that lack canonical Memory payloads", async () => {
@@ -426,6 +559,7 @@ describe("agent-event-bridge", () => {
 		const { runtime, events, notificationService } = await createCtx();
 		await bridgeConnectorMessageReceivedToStreams("TWITCH_MESSAGE_RECEIVED", {
 			runtime,
+			source: "internal-api",
 			accountId: "main",
 			message: {
 				id: "twitch-message-1",
@@ -472,6 +606,23 @@ describe("agent-event-bridge", () => {
 				accountId: "main",
 			},
 		});
+	});
+
+	it("fails closed for unregistered raw connector message event types", async () => {
+		const { runtime, events, notificationService } = await createCtx();
+		await bridgeConnectorMessageReceivedToStreams("INTERNAL_MESSAGE_RECEIVED", {
+			runtime,
+			source: "discord",
+			message: {
+				id: "internal-message-1",
+				channel: "ops",
+				text: "looks like a connector but is not registered",
+			},
+		});
+
+		expect(events.filter((e) => e.stream === "message")).toHaveLength(0);
+		if (!notificationService) throw new Error("NotificationService not loaded");
+		expect(notificationService.list()).toHaveLength(0);
 	});
 
 	it("is a no-op (never throws) when AgentEventService is absent", async () => {

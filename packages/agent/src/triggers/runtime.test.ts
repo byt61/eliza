@@ -46,11 +46,17 @@ interface MockRuntimeHandle {
   updatedTasks: Array<{ id: UUID; patch: Partial<Task> }>;
   warnings: unknown[][];
   notifyCalls: Array<Record<string, unknown>>;
+  reportedErrors: Array<{
+    scope: string;
+    error: unknown;
+    context?: Record<string, unknown>;
+  }>;
   setDispatchResult: (
     result: { ok: true; executionId?: string } | { ok: false; error: string },
   ) => void;
   setWorkflowServicePresent: (present: boolean) => void;
   setRuntimeSetting: (name: string, value: unknown) => void;
+  setNotificationFailure: (error: Error | null) => void;
 }
 
 function makeRuntime(): MockRuntimeHandle {
@@ -60,6 +66,11 @@ function makeRuntime(): MockRuntimeHandle {
   const updatedTasks: Array<{ id: UUID; patch: Partial<Task> }> = [];
   const warnings: unknown[][] = [];
   const notifyCalls: Array<Record<string, unknown>> = [];
+  const reportedErrors: Array<{
+    scope: string;
+    error: unknown;
+    context?: Record<string, unknown>;
+  }> = [];
 
   const messageService = {
     async handleMessage(
@@ -81,6 +92,39 @@ function makeRuntime(): MockRuntimeHandle {
 
   const notificationService = {
     async notify(input: Record<string, unknown>) {
+      if (notificationFailure) throw notificationFailure;
+      const groupKey = typeof input.groupKey === "string" ? input.groupKey : "";
+      if (groupKey) {
+        const existingIndex = notifyCalls.findIndex(
+          (entry) => entry.groupKey === groupKey,
+        );
+        if (existingIndex >= 0) {
+          const previous = notifyCalls[existingIndex] ?? {};
+          const previousData =
+            previous.data &&
+            typeof previous.data === "object" &&
+            !Array.isArray(previous.data)
+              ? previous.data
+              : {};
+          const nextData =
+            input.data &&
+            typeof input.data === "object" &&
+            !Array.isArray(input.data)
+              ? input.data
+              : {};
+          notifyCalls[existingIndex] = {
+            ...input,
+            data: {
+              ...nextData,
+              count:
+                typeof (nextData as { count?: unknown }).count === "number"
+                  ? (nextData as { count: number }).count
+                  : ((previousData as { count?: number }).count ?? 1) + 1,
+            },
+          };
+          return;
+        }
+      }
       notifyCalls.push(input);
     },
   };
@@ -91,6 +135,7 @@ function makeRuntime(): MockRuntimeHandle {
   } = { ok: true, executionId: "exec-1" };
   let workflowServicePresent = true;
   const runtimeSettings = new Map<string, unknown>();
+  let notificationFailure: Error | null = null;
 
   const workflowService = {
     async execute(
@@ -122,6 +167,11 @@ function makeRuntime(): MockRuntimeHandle {
       return null;
     },
     getSetting: (name: string) => runtimeSettings.get(name),
+    reportError: vi.fn(
+      (scope: string, error: unknown, context?: Record<string, unknown>) => {
+        reportedErrors.push({ scope, error, context });
+      },
+    ),
     deleteTask: vi.fn(async (id: UUID) => {
       deletedTaskIds.push(id);
     }),
@@ -140,6 +190,7 @@ function makeRuntime(): MockRuntimeHandle {
     updatedTasks,
     warnings,
     notifyCalls,
+    reportedErrors,
     setDispatchResult: (result) => {
       dispatchResult = result;
     },
@@ -148,6 +199,9 @@ function makeRuntime(): MockRuntimeHandle {
     },
     setRuntimeSetting: (name, value) => {
       runtimeSettings.set(name, value);
+    },
+    setNotificationFailure: (error) => {
+      notificationFailure = error;
     },
   };
 }
@@ -248,7 +302,9 @@ describe("executeTriggerTask", () => {
   it("does not leak trigger outcomes into the user notification inbox by default", async () => {
     const successfulTask = makeTriggerTask({
       triggerType: "interval",
-      displayName: "System health check",
+      displayName: "Owner-visible sounding title",
+      createdBy: String(stringToUuid("internal-scheduler")),
+      notifyOnOutcome: false,
     });
     await executeTriggerTask(handle.runtime, successfulTask, {
       source: "scheduler",
@@ -257,13 +313,90 @@ describe("executeTriggerTask", () => {
     handle.setDispatchResult({ ok: false, error: "internal workflow failed" });
     const failedTask = makeTriggerTask({
       triggerType: "interval",
-      displayName: "System health check retry",
+      displayName: "Drink water now",
+      createdBy: String(stringToUuid("another-internal-source")),
+      notifyOnOutcome: false,
     });
     await executeTriggerTask(handle.runtime, failedTask, {
       source: "scheduler",
     });
 
     expect(handle.notifyCalls).toHaveLength(0);
+  });
+
+  it("emits one outcome notification for an explicit user-authored trigger", async () => {
+    const task = makeTriggerTask({
+      triggerType: "once",
+      displayName: "Drink water",
+      createdBy: "user",
+      notifyOnOutcome: true,
+      kind: "prompt",
+      instructions: "Drink water",
+      workflowId: undefined,
+      workflowName: undefined,
+    });
+
+    const result = await executeTriggerTask(handle.runtime, task, {
+      source: "scheduler",
+    });
+
+    expect(result.status).toBe("success");
+    expect(handle.notifyCalls).toHaveLength(1);
+    expect(handle.notifyCalls[0]).toMatchObject({
+      title: 'Automation "Drink water" completed',
+      category: "workflow",
+      priority: "low",
+      source: "trigger",
+      groupKey: `trigger:${task.id}`,
+    });
+  });
+
+  it("coalesces repeated user-authored trigger outcome notifications by trigger group", async () => {
+    const task = makeTriggerTask({
+      triggerType: "interval",
+      displayName: "Stand up",
+      createdBy: "user",
+      notifyOnOutcome: true,
+    });
+
+    await executeTriggerTask(handle.runtime, task, { source: "scheduler" });
+    await executeTriggerTask(handle.runtime, task, {
+      source: "scheduler",
+      force: true,
+    });
+
+    expect(handle.notifyCalls).toHaveLength(1);
+    const notification = handle.notifyCalls[0];
+    expect(notification?.groupKey).toBe(`trigger:${task.id}`);
+    expect((notification?.data as { count?: number } | undefined)?.count).toBe(
+      2,
+    );
+  });
+
+  it("reports trigger notification write failures without changing the trigger outcome", async () => {
+    handle.setNotificationFailure(new Error("notification store unavailable"));
+    const task = makeTriggerTask({
+      triggerType: "interval",
+      displayName: "Stretch",
+      createdBy: "user",
+      notifyOnOutcome: true,
+    });
+
+    const result = await executeTriggerTask(handle.runtime, task, {
+      source: "scheduler",
+    });
+    await Promise.resolve();
+
+    expect(result.status).toBe("success");
+    expect(handle.reportedErrors).toHaveLength(1);
+    expect(handle.reportedErrors[0]).toMatchObject({
+      scope: "TriggerRuntime.notification",
+      context: {
+        src: "trigger-runtime",
+        taskId: task.id,
+        outcome: "success",
+      },
+    });
   });
 
   it("emits a low-priority completion notification only with the debug opt-in", async () => {

@@ -19,6 +19,7 @@
  * tools), and never throws back into the hot message loop.
  */
 
+import { getConnectorSourceMetadata } from "../connectors.ts";
 import { logger } from "../logger.ts";
 import type { MessageEventData } from "../types/agentEvent.ts";
 import type {
@@ -28,13 +29,6 @@ import type {
 	RunEventPayload,
 } from "../types/events.ts";
 import type { IAgentRuntime } from "../types/index.ts";
-import {
-	MESSAGE_SOURCE_AGENT_GREETING,
-	MESSAGE_SOURCE_CLIENT_CHAT,
-	MESSAGE_SOURCE_CODING_AGENT,
-	MESSAGE_SOURCE_SUB_AGENT,
-	MESSAGE_SOURCE_TRIGGER_PROMPT,
-} from "../types/message-source.ts";
 import type { NotificationInput } from "../types/notification.ts";
 import type { JsonValue } from "../types/primitives.ts";
 import { ChannelType } from "../types/primitives.ts";
@@ -49,6 +43,7 @@ interface RuntimeServiceHost {
 	agentId: IAgentRuntime["agentId"];
 	getService: IAgentRuntime["getService"];
 	getCurrentRunId?: IAgentRuntime["getCurrentRunId"];
+	reportError?: IAgentRuntime["reportError"];
 }
 
 export const CONNECTOR_MESSAGE_RECEIVED_EVENT_TYPES = [
@@ -270,58 +265,39 @@ function isBotMessage(metadata: Record<string, unknown>): boolean {
 	);
 }
 
-/**
- * Sources that are NOT a human reaching the agent from an third-party surface, so
- * an inbound message from them must never mint a user-facing notification:
- *
- *   - `client_chat` / `web` / `message` / `messageservice` — the user's own
- *     local dashboard chat (they are already looking at the reply).
- *   - `api` / `agent_message_api` / `compat_openai` / `compat_anthropic` —
- *     programmatic REST/compat callers (`POST /agents/:id/message`,
- *     `/v1/chat/completions`, `/v1/messages`). This is machine-to-machine
- *     traffic — integration tests, bench harnesses, other services — not a
- *     person the user needs to be interrupted about. On the LP3 home screen
- *     these surfaced as "New API message" cards carrying bench prompts
- *     ("bench bench 3: reply with one short sentence") and stacked into
- *     "Show all 27 Agent Message Api notifications".
- *   - `trigger-prompt` / `sub_agent` / `coding-agent` / `agent_greeting` —
- *     the runtime talking to ITSELF (scheduled trigger wake-ups, sub-agent
- *     relays, greetings). Trigger *outcomes* already notify deliberately on
- *     the workflow rail (triggers/runtime.ts, #10697); the synthetic inbound
- *     prompt must not double-notify as a fake "message".
- */
-const NON_NOTIFYING_MESSAGE_SOURCES: ReadonlySet<string> = new Set(
+const USER_FACING_NOTIFICATION_CHANNEL_TYPES: ReadonlySet<string> = new Set(
 	[
-		MESSAGE_SOURCE_CLIENT_CHAT,
-		MESSAGE_SOURCE_SUB_AGENT,
-		MESSAGE_SOURCE_CODING_AGENT,
-		MESSAGE_SOURCE_AGENT_GREETING,
-		MESSAGE_SOURCE_TRIGGER_PROMPT,
-		"api",
-		"web",
-		"message",
-		"messageservice",
-		"agent_message_api",
-		"compat_openai",
-		"compat_anthropic",
+		ChannelType.DM,
+		ChannelType.GROUP,
+		ChannelType.VOICE_DM,
+		ChannelType.VOICE_GROUP,
+		ChannelType.FEED,
+		ChannelType.THREAD,
+		ChannelType.WORLD,
+		ChannelType.FORUM,
 	].map((value) => value.toLowerCase()),
 );
+
+function hasTrustedNotificationProvenance(
+	payload: MessagePayload,
+	source: string,
+): boolean {
+	const connector = getConnectorSourceMetadata(source);
+	if (!connector?.aliases?.length) return false;
+
+	const channelType = readString(payload.message.content.channelType);
+	if (!channelType) {
+		return false;
+	}
+	return USER_FACING_NOTIFICATION_CHANNEL_TYPES.has(channelType.toLowerCase());
+}
 
 function shouldNotifyForInboundMessage(
 	payload: MessagePayload,
 	source: string,
 ): boolean {
 	const metadata = messageMetadata(payload);
-	const normalizedSource = source.toLowerCase();
-	if (NON_NOTIFYING_MESSAGE_SOURCES.has(normalizedSource)) {
-		return false;
-	}
-	// The API routes stamp `channelType: API` on every message they mint —
-	// including ones minted with a caller-chosen `platformName` that becomes an
-	// arbitrary `content.source`. Classify by the channel the message actually
-	// arrived on, not just the spoofable source label: API-channel traffic is
-	// programmatic and never a user-facing "new message".
-	if (payload.message.content.channelType === ChannelType.API) {
+	if (!hasTrustedNotificationProvenance(payload, source)) {
 		return false;
 	}
 	if (payload.message.entityId === payload.runtime.agentId) {
@@ -331,6 +307,31 @@ function shouldNotifyForInboundMessage(
 		return false;
 	}
 	return true;
+}
+
+function reportBridgeError(
+	runtime: RuntimeServiceHost,
+	scope: string,
+	error: unknown,
+	context: Record<string, unknown>,
+): void {
+	if (typeof runtime.reportError === "function") {
+		runtime.reportError(scope, error, {
+			src: "agent-event-bridge",
+			agentId: runtime.agentId,
+			...context,
+		});
+		return;
+	}
+	logger.warn(
+		{
+			src: "agent-event-bridge",
+			scope,
+			err: error instanceof Error ? error.message : String(error),
+			...context,
+		},
+		`[${scope}] bridge failure`,
+	);
 }
 
 function hasAttachments(payload: MessagePayload): boolean {
@@ -393,6 +394,9 @@ function normalizeRawConnectorMessage(
 	eventType: string,
 	payload: unknown,
 ): RawConnectorMessageSummary | null {
+	const source = CONNECTOR_EVENT_SOURCES[eventType];
+	if (!source) return null;
+
 	const root = readRecord(payload);
 	const runtime = readRuntime(root.runtime);
 	if (!runtime) return null;
@@ -405,8 +409,6 @@ function normalizeRawConnectorMessage(
 	const user = readRecord(root.user ?? message.user ?? message.sender);
 	const twitchUser = readRecord(message.user);
 
-	const source =
-		firstString(root.source, CONNECTOR_EVENT_SOURCES[eventType]) ?? "connector";
 	const channel = firstString(
 		message.channel,
 		lineSource.type,
@@ -576,13 +578,17 @@ export async function bridgeConnectorMessageReceivedToStreams(
 			agentId: message.runtime.agentId,
 		});
 	} catch (err) {
-		logger.debug(
+		reportBridgeError(
+			message.runtime,
+			"AgentEventBridge.connectorNotify",
+			err,
 			{
-				src: "agent-event-bridge",
 				eventType,
-				err: err instanceof Error ? err.message : String(err),
+				source: message.source,
+				channel: message.channel,
+				messageId: message.messageId,
+				roomId: message.roomId,
 			},
-			"Failed to create connector-message notification",
 		);
 	}
 }
@@ -647,8 +653,8 @@ export async function bridgeMessageReceivedToStreams(
 
 	const senderName = resolveMessageSenderName(payload);
 	const title = senderName
-		? `New ${channel} message from ${senderName}`
-		: `New ${channel} message`;
+		? `New ${source} message from ${senderName}`
+		: `New ${source} message`;
 	const wasMentioned =
 		readBoolean(messageMetadata(payload).wasMentioned) === true ||
 		(isRecord(payload.message.content.mentionContext) &&
@@ -668,13 +674,13 @@ export async function bridgeMessageReceivedToStreams(
 			agentId: payload.runtime.agentId,
 		});
 	} catch (err) {
-		logger.debug(
-			{
-				src: "agent-event-bridge",
-				err: err instanceof Error ? err.message : String(err),
-			},
-			"Failed to create inbound-message notification",
-		);
+		reportBridgeError(payload.runtime, "AgentEventBridge.inboundNotify", err, {
+			source,
+			channel,
+			messageId: payload.message.id,
+			roomId: payload.message.roomId,
+			entityId: payload.message.entityId,
+		});
 	}
 }
 
