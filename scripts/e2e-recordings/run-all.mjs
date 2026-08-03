@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 
 /**
- * run-all.mjs
- *
- * Orchestrates running all E2E suites with recording enabled, then generates
- * contact sheets, the viewer index, and an optional local evidence dashboard.
+ * Orchestrates all E2E suites with recording enabled, then generates contact
+ * sheets, the viewer index, and an optional local evidence dashboard.
  *
  * Usage:
  *   node scripts/e2e-recordings/run-all.mjs
@@ -32,6 +30,20 @@ const SKIP_EXIT_CODE = 77;
 
 const SCRIPTS_DIR = __dirname;
 const PACKAGES = UI_E2E_SUITES;
+
+/** Returns the canonical artifact destination advertised for a suite. */
+export function recordingOutputDirForSuite(pkg) {
+  return path.join(RECORDINGS_DIR, pkg.name, "test-results");
+}
+
+function recordingEnvironment(pkg, outputDir) {
+  return {
+    ...process.env,
+    ...(pkg.recordEnv ? pkg.recordEnv : {}),
+    E2E_RECORD: "1",
+    E2E_RECORDING_DIR: outputDir,
+  };
+}
 
 // ─── CLI argument parsing ────────────────────────────────────────────────────
 export function parseRunAllArgs(argv) {
@@ -165,7 +177,7 @@ function runCommandSuite(pkg) {
     }
   }
 
-  const outputDir = path.join(RECORDINGS_DIR, pkg.name, "test-results");
+  const outputDir = recordingOutputDirForSuite(pkg);
   fs.mkdirSync(outputDir, { recursive: true });
   console.log(`  Running: ${formatCommand(pkg.command)}`);
   console.log(`  Output:  e2e-recordings/${pkg.name}/test-results/`);
@@ -174,11 +186,7 @@ function runCommandSuite(pkg) {
   const result = spawnSync(bin, args, {
     cwd: REPO_ROOT,
     stdio: "inherit",
-    env: {
-      ...process.env,
-      E2E_RECORD: "1",
-      ...(pkg.recordEnv ?? {}),
-    },
+    env: recordingEnvironment(pkg, outputDir),
   });
 
   const exitCode = result.status ?? 1;
@@ -255,7 +263,7 @@ function runPackageTests(pkg) {
   }
 
   // Ensure the recording output directory exists so Playwright has somewhere to write
-  const recordingOut = path.join(RECORDINGS_DIR, pkg.name, "test-results");
+  const recordingOut = recordingOutputDirForSuite(pkg);
   fs.mkdirSync(recordingOut, { recursive: true });
 
   console.log(`  Running: bun run --cwd ${pkg.configDir} ${pkg.script}`);
@@ -264,14 +272,9 @@ function runPackageTests(pkg) {
   const result = spawnSync("bun", ["run", "--cwd", pkg.configDir, pkg.script], {
     cwd: REPO_ROOT,
     stdio: "inherit",
-    env: {
-      ...process.env,
-      // Signal to Playwright config that we want full recording.
-      // The config itself computes outputDir from import.meta.dirname + E2E_RECORD.
-      E2E_RECORD: "1",
-      // Per-package extra env (e.g. ELIZA_UI_SMOKE_FORCE_STUB for the app package).
-      ...(pkg.recordEnv ?? {}),
-    },
+    // Custom runners consume the explicit destination; Playwright configs can
+    // continue deriving their package destination from E2E_RECORD.
+    env: recordingEnvironment(pkg, recordingOut),
   });
 
   const exitCode = result.status ?? 1;

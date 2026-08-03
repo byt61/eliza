@@ -1,7 +1,9 @@
 # Agent-surface e2e — manual review
 
 Run: `bun run --cwd packages/ui test:agent-surface-e2e` (real headless chromium,
-no app server). Screenshots land in `output/`.
+no app server). Direct runs write to `output/`. The canonical
+`bun run test:e2e:record --packages=ui-agent-surface` command writes the same
+artifacts to `e2e-recordings/ui-agent-surface/test-results/`.
 
 ## Verdict: **good**
 
@@ -26,4 +28,3 @@ What the run proves, in a real browser:
 This is the contract every converted view inherits: the floating pill can list,
 anchor to, fill, click, focus, and visually indicate any registered element from
 voice or text, and the view reacts — no in-view chat required.
-</content>
