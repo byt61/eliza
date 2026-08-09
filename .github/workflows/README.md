@@ -17,7 +17,9 @@ core smoke tests. It never publishes packages or creates releases.
 
 ## Manual operations
 
-- `live-smoke.yml` is the only credential-backed integration-test entry point.
+- `live-smoke.yml` is the only credential-backed integration-test entry point;
+  its `dedicated` suite owns the managed dedicated staging canary and exact
+  stale-canary recovery.
 - `release.yaml` is the only package/tag/GitHub Release entry point.
 - `infra.yml` is the only Terraform plan, apply, and state-edit entry point.
 - `voice-code-bench.yml` retains the bounded real-ASR benchmark.
