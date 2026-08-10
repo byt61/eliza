@@ -1037,3 +1037,4 @@ packages/ui/src/components/shell/__e2e__/output-home-locale/
 /eliza/
 .cloud-production-main/
 .mooncycles-latest/
+output/
