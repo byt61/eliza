@@ -153,6 +153,29 @@ describe("GitHub action supply-chain references", () => {
     expect(source).not.toContain("playwright install --with-deps chromium");
   });
 
+  test("keeps aggregate CI smoke from rerunning the full homepage suite", () => {
+    const source = readFileSync(join(githubRoot, "workflows", "ci.yml"), "utf8");
+    const workflow = Bun.YAML.parse(source) as {
+      jobs?: {
+        smoke?: {
+          steps?: Array<{
+            name?: string;
+            env?: Record<string, string>;
+            run?: string;
+          }>;
+        };
+      };
+    };
+    const e2eStep = workflow.jobs?.smoke?.steps?.find(
+      (step) => step.name === "Deterministic end-to-end smoke",
+    );
+
+    expect(e2eStep?.run).toBe("bun run test:e2e");
+    expect(e2eStep?.env?.TEST_PACKAGE_FILTER).toBe(
+      "^(?!eliza-app \\(packages/homepage\\)#test:e2e$)",
+    );
+  });
+
   test("keeps production homepage deploys read-only and fully gated", () => {
     const source = readFileSync(
       join(githubRoot, "workflows", "deploy-homepage.yml"),

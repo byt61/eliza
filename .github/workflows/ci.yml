@@ -197,6 +197,12 @@ jobs:
 
       - name: Deterministic end-to-end smoke
         if: needs.changes.outputs.zero_key == 'true'
+        env:
+          # Homepage Playwright coverage is owned by quality.yml/deploy-homepage.yml.
+          # Keeping it out of the aggregate zero-key smoke lane prevents
+          # unrelated PRs from exhausting this job's wall clock before the lane
+          # reaches the affected app/runtime suites.
+          TEST_PACKAGE_FILTER: "^(?!eliza-app \\(packages/homepage\\)#test:e2e$)"
         run: bun run test:e2e
 
       - name: Cloud tests
