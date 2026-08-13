@@ -35,7 +35,7 @@ export function hasMatchingEvidenceHead(body, headSha) {
   if (!/^[a-f0-9]{40}$/i.test(String(headSha ?? ""))) return false;
   const matches = [
     ...String(body ?? "").matchAll(
-      /<!--\s*evidence-head:\s*([a-f0-9]{40})\s*-->/gi,
+      /<!--\s*evidence-head:([a-f0-9]{40})\s*-->/gi,
     ),
   ];
   return (
