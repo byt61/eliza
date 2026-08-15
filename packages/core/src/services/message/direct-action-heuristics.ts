@@ -387,6 +387,8 @@ export type DirectCurrentRequestCandidateKind =
 	| "owner-routines"
 	| "owner-reads"
 	| "owner-scheduled-admin"
+	| "owner-work-thread"
+	| "media-generation"
 	| "view-surface"
 	| "view-navigation"
 	| "view-capability"
@@ -671,6 +673,71 @@ function findScheduledAdminActionName(
 	actions: ReadonlyArray<Pick<Action, "name" | "similes">>,
 ): string | undefined {
 	return findAvailableActionName(actions, SCHEDULED_ADMIN_ACTION_NAMES);
+}
+
+const MEDIA_GENERATION_ACTION_NAMES = [
+	"GENERATE_MEDIA",
+	"GENERATE_IMAGE",
+	"CREATE_IMAGE",
+] as const;
+
+/**
+ * Detects an explicit media-generation ask ("make me a pixel-art castle
+ * image", "generate a picture of a lighthouse"). Live regression (matrix
+ * F35, tj-fcf8c1c21be91f): Stage-1 classified a styled image ask as
+ * ["simple"] with no candidates, the planner ran with HANDLE_RESPONSE only,
+ * and the model declared "I don't have an image generator" — an hour after
+ * the same runtime generated and delivered one. Capability self-belief
+ * follows tool exposure, so the deterministic candidate is what keeps the
+ * answer consistent. Generation verbs must pair with a visual-artifact noun:
+ * "create a todo" and "draw up a plan" never match.
+ */
+function looksLikeMediaGenerationRequest(text: string): boolean {
+	const normalized = text.toLowerCase().replace(/\s+/gu, " ").trim();
+	if (!normalized || looksLikeActionExplanationRequest(normalized)) {
+		return false;
+	}
+	return /\b(?:generate|make|draw|create|render|paint|produce)\b[^.!?]{0,60}\b(?:image|picture|photo|art(?:work)?|illustration|logo|sticker|wallpaper|drawing|painting|meme|gif)s?\b/iu.test(
+		normalized,
+	);
+}
+
+function findMediaGenerationActionName(
+	actions: ReadonlyArray<Pick<Action, "name" | "similes">>,
+): string | undefined {
+	return findAvailableActionName(actions, MEDIA_GENERATION_ACTION_NAMES);
+}
+
+const WORK_THREAD_ACTION_NAMES = [
+	"WORK_THREAD",
+	"OWNER_TASKS",
+	"WORK_THREADS",
+] as const;
+
+/**
+ * Detects an explicit work-thread lifecycle ask ("start a work thread: plan
+ * the garage cleanout", "resume the kitchen reno work thread"). Live
+ * regression (matrix F27, tj-ee16a14fea597e): Stage-1 classified the ask as
+ * bare ["general"] with no candidates, the planner ran with HANDLE_RESPONSE
+ * only, and the model composed a fictional surface refusal ("can't do that
+ * here — dm me") — the same drift class as the owner-item delete leg. The
+ * phrase "work thread" is the surface's own vocabulary, so the deterministic
+ * candidate is precise.
+ */
+function looksLikeWorkThreadRequest(text: string): boolean {
+	const normalized = text.toLowerCase().replace(/\s+/gu, " ").trim();
+	if (!normalized || looksLikeActionExplanationRequest(normalized)) {
+		return false;
+	}
+	return /\b(?:start|open|kick ?off|begin|resume|continue|pick (?:up|back up))\b[^.!?]{0,40}\bwork[- ]threads?\b/iu.test(
+		normalized,
+	);
+}
+
+function findWorkThreadActionName(
+	actions: ReadonlyArray<Pick<Action, "name" | "similes">>,
+): string | undefined {
+	return findAvailableActionName(actions, WORK_THREAD_ACTION_NAMES);
 }
 
 /**
@@ -977,6 +1044,29 @@ export function inferDirectCurrentRequestCandidateInference(
 		);
 		if (ownerDeleteAction) {
 			return { names: [ownerDeleteAction], kind: "owner-scheduled-admin" };
+		}
+		return EMPTY_DIRECT_CANDIDATE_INFERENCE;
+	}
+	// Work-thread lifecycle asks name the surface's own vocabulary; without a
+	// deterministic candidate Stage-1 drift leaves the turn tool-less and the
+	// model invents a surface refusal (matrix F27). Same
+	// no-candidate-on-missing-surface rule as the legs above.
+	if (looksLikeWorkThreadRequest(messageText)) {
+		const workThreadAction = findWorkThreadActionName(actions);
+		if (workThreadAction) {
+			return { names: [workThreadAction], kind: "owner-work-thread" };
+		}
+		return EMPTY_DIRECT_CANDIDATE_INFERENCE;
+	}
+	// Media-generation asks: capability self-belief follows tool exposure, so
+	// a Stage-1 drift that leaves the turn tool-less makes the model deny a
+	// capability it demonstrably has (matrix F35). Unlike the owner legs, a
+	// missing surface yields no candidate AND no forced escalation — an agent
+	// genuinely without a generator should answer honestly from chat.
+	if (looksLikeMediaGenerationRequest(messageText)) {
+		const mediaAction = findMediaGenerationActionName(actions);
+		if (mediaAction) {
+			return { names: [mediaAction], kind: "media-generation" };
 		}
 		return EMPTY_DIRECT_CANDIDATE_INFERENCE;
 	}
