@@ -1,8 +1,11 @@
 /**
  * Covers `requireConfirmation`: it confirms a pending action only when the
- * follow-up text is a metadata-marked wrapped external payload, and treats
- * marker-shaped user text lacking that metadata as a cancellation. Deterministic:
- * Map-backed runtime cache stub, no model or database.
+ * follow-up text is a metadata-marked wrapped external payload, treats
+ * marker-shaped user text lacking that metadata as a cancellation, and applies
+ * the default multilingual yes detector across a locale matrix (bare tokens at
+ * end of input, full-width CJK punctuation, quoted forms, and prefix-word
+ * false-positive controls such as `sígueme`). Deterministic: Map-backed
+ * runtime cache stub, no model or database.
  */
 import { describe, expect, it } from "vitest";
 import { wrapExternalContent } from "../security/external-content";
@@ -93,5 +96,62 @@ describe("requireConfirmation", () => {
 				message: message(markerText),
 			}),
 		).resolves.toEqual({ status: "cancelled", metadata: undefined });
+	});
+
+	describe("default multilingual yes detector", () => {
+		async function decideReply(reply: string) {
+			const runtime = createRuntimeStub();
+			const args = {
+				runtime,
+				actionName: "DELETE_ISSUE",
+				pendingKey: "delete:issue-1",
+				prompt: "Permanently delete issue 1?",
+			};
+			await expect(
+				requireConfirmation({ ...args, message: message("delete issue 1") }),
+			).resolves.toEqual({ status: "pending" });
+			const decision = await requireConfirmation({
+				...args,
+				message: message(reply),
+			});
+			return decision.status;
+		}
+
+		it.each([
+			// Bare tokens at end of input, no ASCII word boundary available.
+			"sí",
+			"はい",
+			"确认",
+			"確認",
+			"확인",
+			// Full-width CJK punctuation after the token.
+			"はい。",
+			"はい！",
+			"はい？",
+			"はい、分かりました",
+			"确认，请继续",
+			// Opening/closing CJK quote brackets around the token.
+			"「はい」",
+			// ASCII forms must keep working under the shared terminator contract.
+			"yes",
+			"Yes, do it",
+			"ok!",
+			"y",
+		])("confirms %j", async (reply) => {
+			await expect(decideReply(reply)).resolves.toBe("confirmed");
+		});
+
+		it.each([
+			// Confirmation tokens as prefixes of longer words must not confirm.
+			"sígueme",
+			"yesterday",
+			"はいって言わないで",
+			"确认吗？",
+			// Plain refusals.
+			"no",
+			"nope",
+		])("cancels %j", async (reply) => {
+			await expect(decideReply(reply)).resolves.toBe("cancelled");
+		});
 	});
 });

@@ -42,9 +42,15 @@ const DEFAULT_TTL_MS = 5 * 60_000;
 /**
  * Default broad multilingual yes detector. Consumers can pass a custom
  * `confirmRegex` if they want stricter or extended matching.
+ *
+ * Every token shares one terminator contract: the token must be followed by
+ * whitespace, Unicode punctuation/symbols (covers full-width 。，！？：；、
+ * as well as ASCII), or end of input — never by a letter or digit, so
+ * `sígueme` cannot confirm via `sí`. Leading whitespace and opening
+ * quotes/brackets (e.g. 「はい」, "yes") are tolerated before the token.
  */
 const DEFAULT_CONFIRM_REGEX =
-	/^\s*(?:(yes|yeah|yep|y|ok|okay|sure|confirm|confirmed|do it|go ahead|proceed|approve|approved|si|oui|ja|hai)\b|(sí|はい|确认|확인)(?=\s|$|[.,!?:;]))/i;
+	/^[\s\p{Pi}\p{Ps}"']*(yes|yeah|yep|y|ok|okay|sure|confirm|confirmed|do it|go ahead|proceed|approve|approved|si|sí|oui|ja|hai|はい|确认|確認|확인)(?=[\s\p{P}\p{S}]|$)/iu;
 
 export type ConfirmationStatus = "pending" | "confirmed" | "cancelled";
 
