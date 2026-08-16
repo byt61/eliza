@@ -31,7 +31,7 @@ function truncatePrompt(prompt: string): string {
   if (prompt.length <= MAX_PROMPT_LENGTH) {
     return prompt;
   }
-  return `${prompt.slice(0, MAX_PROMPT_LENGTH)}…`;
+  return `${prompt.slice(0, MAX_PROMPT_LENGTH - 1)}…`;
 }
 
 export function emitModelUsageEvent(

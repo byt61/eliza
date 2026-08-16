@@ -659,7 +659,7 @@ function truncateEntityMetadata(metadata: unknown): string {
 	if (rendered.length <= MAX_ENTITY_METADATA_CHARS) {
 		return rendered;
 	}
-	return `${truncateWellFormed(rendered, MAX_ENTITY_METADATA_CHARS)}... (truncated)`;
+	return `${truncateWellFormed(rendered, MAX_ENTITY_METADATA_CHARS - 15)}... (truncated)`;
 }
 
 export function formatEntities({ entities }: { entities: Entity[] }) {
