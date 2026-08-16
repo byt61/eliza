@@ -438,6 +438,8 @@ export function persistDataUrl(dataUrl: string): PersistedMedia | null {
     return null;
   }
   if (buffer.length === 0) return null;
+  const MAX_DATA_URL_BYTES = 15 * 1024 * 1024;
+  if (buffer.length > MAX_DATA_URL_BYTES) return null;
   return persistMediaBytes(buffer, mimeType);
 }
 
@@ -830,6 +832,22 @@ export function handleMediaRouteRequest(
   }
   if (range) {
     const length = range.end - range.start + 1;
+    let body: Buffer;
+    try {
+      const fd = fs.openSync(resolved.filePath, "r");
+      try {
+        body = Buffer.alloc(length);
+        fs.readSync(fd, body, 0, length, range.start);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch (err) {
+      throw new ElizaError(`media range read failed for ${resolved.name}`, {
+        code: "MEDIA_STORE_READ_FAILED",
+        cause: err,
+        context: { name: resolved.name, range },
+      });
+    }
     return {
       status: 206,
       headers: {
@@ -837,9 +855,7 @@ export function handleMediaRouteRequest(
         "Content-Range": `bytes ${range.start}-${range.end}/${resolved.size}`,
         "Content-Length": String(length),
       },
-      body: fs
-        .readFileSync(resolved.filePath)
-        .subarray(range.start, range.end + 1),
+      body,
     };
   }
 
