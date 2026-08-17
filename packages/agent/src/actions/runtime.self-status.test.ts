@@ -89,6 +89,23 @@ describe("RUNTIME self_status registry seam", () => {
     },
   );
 
+  it.each([
+    ["brief", 1200],
+    ["full", 8000],
+  ] as const)(
+    "does not truncate at-cap %s detail remains intact",
+    async (detailLevel, maxChars) => {
+      const service: AwarenessServiceLike = {
+        getDetail: async () => "x".repeat(maxChars),
+      };
+      const result = await runSelfStatus(makeRuntime(service), detailLevel);
+      expect(result.success).toBe(true);
+      expect(result.text).toHaveLength(maxChars);
+      expect(result.text?.endsWith("\n…[self-status truncated]")).toBe(false);
+      expect(result.data?.truncated).toBe(false);
+    },
+  );
+
   it("degrades to the live status snapshot when no AWARENESS_REGISTRY service is registered", async () => {
     // The registry is optional enrichment; without it the runtime still owns a
     // real answer (live incident: a self-description question got the generic
