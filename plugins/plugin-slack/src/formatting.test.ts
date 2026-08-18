@@ -5,6 +5,8 @@
  * must reject malformed boundary values; and markdown→mrkdwn must use Slack's
  * *bold* / _italic_ syntax rather than the markdown originals.
  */
+
+import { toWellFormedUnicode } from "@elizaos/core";
 import { describe, expect, it } from "vitest";
 import {
   buildSlackMessagePermalink,
@@ -167,6 +169,84 @@ describe("splitSlackText", () => {
       expect(chunks.join("")).toBe(text);
     },
   );
+});
+
+describe("splitSlackText surrogate-pair safety", () => {
+  it("never tears an emoji across chunks when no whitespace break exists", () => {
+    const text = `x${"\u{1F600}".repeat(1200)}`;
+    const chunks = splitSlackText(text, 2000);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(toWellFormedUnicode(chunk)).toBe(chunk);
+    }
+    expect(chunks.join("")).toBe(text);
+  });
+
+  it("terminates and stays well formed at maxChars: 1", () => {
+    const text = "\u{1F600}".repeat(5);
+    const chunks = splitSlackText(text, 1);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(toWellFormedUnicode(chunk)).toBe(chunk);
+    }
+    expect(chunks.join("")).toBe(text);
+  }, 5_000);
+
+  it("still breaks at whitespace when one is available near the limit", () => {
+    const text = `${"a".repeat(1990)} ${"b".repeat(50)}`;
+    const chunks = splitSlackText(text, 2000);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.join("")).toBe(text);
+  });
+});
+
+describe("chunkSlackText surrogate-pair safety", () => {
+  it("never tears an emoji across chunks when no whitespace break exists", () => {
+    const text = `x${"\u{1F600}".repeat(1200)}`;
+    const chunks = chunkSlackText(text, 2000);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(toWellFormedUnicode(chunk)).toBe(chunk);
+    }
+    expect(chunks.join("")).toBe(text);
+  });
+
+  it("never tears an emoji across chunks inside a fenced code block", () => {
+    const body = `x${"\u{1F600}".repeat(1200)}`;
+    const text = `\`\`\`\n${body}\n\`\`\``;
+    const chunks = chunkSlackText(text, 2000);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(toWellFormedUnicode(chunk)).toBe(chunk);
+    }
+  });
+
+  it("still breaks at whitespace when one is available near the limit", () => {
+    const text = `${"a".repeat(1990)} ${"b".repeat(50)}`;
+    const chunks = chunkSlackText(text, 2000);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.join("")).toBe(text);
+  });
+
+  it("terminates and stays well formed at maxChars: 1 (no-whitespace path)", () => {
+    const text = "\u{1F600}".repeat(5);
+    const chunks = chunkSlackText(text, 1);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(toWellFormedUnicode(chunk)).toBe(chunk);
+    }
+    expect(chunks.join("")).toBe(text);
+  }, 5_000);
+
+  it("terminates and stays well formed at maxChars: 1 (fenced path)", () => {
+    const body = "\u{1F600}".repeat(5);
+    const text = `\`\`\`\n${body}\n\`\`\``;
+    const chunks = chunkSlackText(text, 1);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(toWellFormedUnicode(chunk)).toBe(chunk);
+    }
+  }, 5_000);
 });
 
 describe("truncateText", () => {

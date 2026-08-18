@@ -8,6 +8,7 @@
  * channel-type / display-name helpers. Used by `service.ts` on the send/receive
  * paths and re-exported from `index.ts`.
  */
+import { truncateWellFormed } from "@elizaos/core";
 import {
   parseSlackArchivesUrl,
   type SlackChannel,
@@ -194,6 +195,11 @@ export interface ChunkSlackTextOpts {
 
 const DEFAULT_MAX_CHARS = 4000;
 
+function takeWellFormedChunk(text: string, limit: number): string {
+  const chunk = truncateWellFormed(text, limit);
+  return chunk.length > 0 ? chunk : truncateWellFormed(text, limit + 1);
+}
+
 /**
  * Splits plain Slack message text at newline/space boundaries without ever
  * emitting more than `maxChars`. Unlike `chunkSlackText`, this does not add
@@ -216,18 +222,19 @@ export function splitSlackText(
       break;
     }
 
-    let splitIndex = maxChars;
-    const lastNewline = remaining.lastIndexOf("\n", maxChars);
+    const window = takeWellFormedChunk(remaining, maxChars);
+    let splitIndex = window.length;
+    const lastNewline = window.lastIndexOf("\n");
     if (lastNewline > maxChars / 2) {
       splitIndex = lastNewline + 1;
     } else {
-      const lastSpace = remaining.lastIndexOf(" ", maxChars);
+      const lastSpace = window.lastIndexOf(" ");
       if (lastSpace > maxChars / 2) {
         splitIndex = lastSpace + 1;
       }
     }
 
-    splitIndex = Math.min(splitIndex, maxChars);
+    splitIndex = Math.min(splitIndex, window.length);
     messages.push(remaining.slice(0, splitIndex));
     remaining = remaining.slice(splitIndex);
   }
@@ -263,15 +270,16 @@ export function chunkSlackText(
     // Find a good break point. Reserve room for the closing "\n```" fence so
     // a chunk that splits inside a code block never exceeds maxChars.
     const hardLimit = Math.max(maxChars - 4, 1);
-    let breakPoint = hardLimit;
+    const window = takeWellFormedChunk(remaining, hardLimit);
+    let breakPoint = window.length;
 
     // Try to break at a newline
-    const newlineIndex = remaining.lastIndexOf("\n", hardLimit);
+    const newlineIndex = window.lastIndexOf("\n");
     if (newlineIndex > maxChars * 0.5) {
       breakPoint = newlineIndex + 1;
     } else {
       // Try to break at a space
-      const spaceIndex = remaining.lastIndexOf(" ", hardLimit);
+      const spaceIndex = window.lastIndexOf(" ");
       if (spaceIndex > maxChars * 0.5) {
         breakPoint = spaceIndex + 1;
       }
@@ -280,7 +288,7 @@ export function chunkSlackText(
     // lastIndexOf is inclusive of its fromIndex, so a newline or space sitting
     // exactly on hardLimit yields breakPoint = hardLimit + 1 and the reserved
     // fence budget is spent, pushing the emitted chunk to maxChars + 1.
-    breakPoint = Math.min(breakPoint, hardLimit);
+    breakPoint = Math.min(breakPoint, window.length);
 
     let chunk = remaining.slice(0, breakPoint);
 
