@@ -271,7 +271,7 @@ export async function refreshKedaActivity(
 let k8sToken: string | null = null;
 let k8sCaCert: string | null = null;
 
-function getK8sToken(): string | null {
+export function getK8sToken(): string | null {
   if (k8sToken !== null) return k8sToken;
   try {
     k8sToken = readFileSync(
@@ -287,7 +287,7 @@ function getK8sToken(): string | null {
   return k8sToken || null;
 }
 
-function getK8sCaCert(): string | null {
+export function getK8sCaCert(): string | null {
   if (k8sCaCert !== null) return k8sCaCert;
   try {
     k8sCaCert = readFileSync(
@@ -303,15 +303,26 @@ function getK8sCaCert(): string | null {
   return k8sCaCert || null;
 }
 
-function parseNamespaceFromUrl(serverUrl: string): string | null {
+export function parseNamespaceFromUrl(serverUrl: string): string | null {
   const match = serverUrl.match(/^https?:\/\/[^.]+\.([^.]+)\.svc/);
   return match?.[1] ?? null;
 }
 
-async function wakeServer(
+export function isDirectServerUrl(serverUrl: string): boolean {
+  try {
+    const { hostname } = new URL(serverUrl);
+    return !(hostname.endsWith(".svc") || hostname.includes(".svc."));
+  } catch {
+    return true;
+  }
+}
+
+export async function wakeServer(
   serverName: string,
   serverUrl: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
 ): Promise<void> {
+  if (isDirectServerUrl(serverUrl)) return;
   const token = getK8sToken();
   if (!token) return;
 
@@ -321,7 +332,7 @@ async function wakeServer(
   const apiUrl = `https://kubernetes.default.svc/apis/apps/v1/namespaces/${namespace}/deployments/${serverName}/scale`;
 
   try {
-    const res = await fetch(apiUrl, {
+    const res = await fetchImpl(apiUrl, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -345,6 +356,18 @@ async function wakeServer(
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/** Test seam: allow tests to override cached K8s credentials without touching fs. */
+export function __setK8sTokenForTest(token: string | null): void {
+  k8sToken = token;
+}
+export function __setK8sCaCertForTest(cert: string | null): void {
+  k8sCaCert = cert;
+}
+export function __resetK8sCacheForTest(): void {
+  k8sToken = null;
+  k8sCaCert = null;
 }
 
 /**

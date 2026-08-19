@@ -1,74 +1,109 @@
 /**
- * Proves wakeServer K8s PATCH is bounded by AbortSignal.timeout(15_000).
+ * Behavioral coverage for wakeServer K8s PATCH timeout.
+ *
+ * Production bounds the PATCH with `signal: AbortSignal.timeout(15_000)` so a
+ * stalled `kubernetes.default.svc` does not hang forever. Current call sites
+ * are intentionally fire-and-forget (`wakeServer(...)` without await), so a
+ * hung PATCH does NOT block the retry loop — it leaks a background request
+ * and its resources until the gateway process exits.
+ *
+ * This test proves the bound via an injected fetch seam rather than
+ * file-grep strings.
  */
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import {
+  __resetK8sCacheForTest,
+  __setK8sCaCertForTest,
+  __setK8sTokenForTest,
+  wakeServer,
+} from "./server-router";
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+const SERVER_NAME = "test-deploy";
+const SERVER_URL = "http://test-deploy.test-ns.svc:3000";
 
-const file = readFileSync(
-  resolve("packages/cloud/services/gateway-webhook/src/server-router.ts"),
-  "utf8",
-);
-const siblingPath = resolve(
-  "plugins/plugin-health/src/health-bridge/health-oauth.ts",
-);
-let sibling = "";
-try {
-  sibling = readFileSync(siblingPath, "utf8");
-} catch {}
+function hangingFetch(): typeof fetch {
+  return ((_: string, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      const signal = init?.signal as AbortSignal | undefined;
+      if (!signal) return;
+      if (signal.aborted) {
+        reject(new DOMException("signal timed out", "TimeoutError"));
+        return;
+      }
+      signal.addEventListener(
+        "abort",
+        () => reject(new DOMException("signal timed out", "TimeoutError")),
+        { once: true },
+      );
+    })) as unknown as typeof fetch;
+}
 
-describe("gateway-webhook wakeServer timeout", () => {
-  it("reserve present: wakeServer PATCH bounded by 15s", () => {
-    expect(file).toContain("signal: AbortSignal.timeout(15_000)");
-    expect(file).toContain("kubernetes.default.svc");
-    const wakeIdx = file.indexOf("async function wakeServer");
-    const sigIdx = file.indexOf("signal: AbortSignal.timeout(15_000)");
-    expect(wakeIdx).toBeGreaterThan(-1);
-    expect(sigIdx).toBeGreaterThan(wakeIdx);
+function okFetch(): typeof fetch {
+  return (async () => ({ ok: true, status: 200, text: async () => "" }) as Response) as unknown as typeof fetch;
+}
+
+function non2xxFetch(): typeof fetch {
+  return (async () =>
+    ({ ok: false, status: 500, text: async () => "internal error" }) as Response) as unknown as typeof fetch;
+}
+
+describe("gateway-webhook wakeServer timeout (behavioral)", () => {
+  let timeoutSpy: ReturnType<typeof spyOn>;
+
+  beforeEach(() => {
+    __setK8sTokenForTest("fake-k8s-token");
+    __setK8sCaCertForTest(null);
+    const orig = AbortSignal.timeout.bind(AbortSignal);
+    timeoutSpy = spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      if (ms === 15_000) return orig(10);
+      return orig(ms);
+    });
   });
 
-  it("no bare fetch without signal in wakeServer", () => {
-    const start = file.indexOf("async function wakeServer");
-    const snippet = file.slice(start, start + 1200);
-    const fetchBlocks = [
-      ...snippet.matchAll(
-        /await fetch\(apiUrl, \{([\s\S]*?)\} as RequestInit\)/g,
-      ),
-    ];
-    expect(fetchBlocks.length).toBe(1);
-    for (const m of fetchBlocks) {
-      expect(m[1]).toContain("signal: AbortSignal.timeout(15_000)");
-    }
-    expect(snippet).not.toMatch(
-      /await fetch\(apiUrl, \{[^}]*method: "PATCH"[^}]*tls: \{[^}]*\}[^}]*\} as RequestInit\)/s,
-    );
+  afterEach(() => {
+    timeoutSpy.mockRestore();
+    __resetK8sCacheForTest();
   });
 
-  it("count: exactly one bounded K8s PATCH", () => {
-    const count = (file.match(/signal: AbortSignal\.timeout\(15_000\)/g) || [])
-      .length;
-    expect(count).toBeGreaterThanOrEqual(1);
-    const wakeCount = (
-      file
-        .slice(
-          file.indexOf("async function wakeServer"),
-          file.indexOf("async function wakeServer") + 1500,
-        )
-        .match(/signal: AbortSignal\.timeout\(15_000\)/g) || []
-    ).length;
-    expect(wakeCount).toBe(1);
+  it("aborts a never-settling PATCH at the deadline via AbortSignal.timeout(15_000)", async () => {
+    const start = Date.now();
+    await expect(wakeServer(SERVER_NAME, SERVER_URL, hangingFetch())).resolves.toBeUndefined();
+    const elapsed = Date.now() - start;
+    expect(timeoutSpy).toHaveBeenCalled();
+    const calledWith15s = timeoutSpy.mock.calls.some((c) => c[0] === 15_000);
+    expect(calledWith15s).toBe(true);
+    expect(elapsed).toBeLessThan(500);
   });
 
-  it("payload weak vs fixed + sibling correct", () => {
-    const weak =
-      'await fetch(apiUrl, { method: "PATCH", headers: { Authorization:';
-    const fixed = "signal: AbortSignal.timeout(15_000)";
-    expect(file).not.toContain(
-      weak.replace("signal: AbortSignal.timeout(15_000),", ""),
-    );
-    expect(file).toContain(fixed);
-    expect(sibling).toContain("signal: AbortSignal.timeout(15_000)");
-    expect(sibling).toMatch(/AbortSignal\.timeout\(15_000\)/);
+  it("resolves on success (ok:true) without throwing", async () => {
+    await expect(wakeServer(SERVER_NAME, SERVER_URL, okFetch())).resolves.toBeUndefined();
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+  });
+
+  it("handles non-2xx without throwing (logs and resolves)", async () => {
+    await expect(wakeServer(SERVER_NAME, SERVER_URL, non2xxFetch())).resolves.toBeUndefined();
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+  });
+
+  it("fire-and-forget does not produce unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const handler = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", handler);
+    const p = wakeServer(SERVER_NAME, SERVER_URL, hangingFetch());
+    await p;
+    await new Promise((r) => setTimeout(r, 20));
+    process.off("unhandledRejection", handler);
+    expect(unhandled).toEqual([]);
+  });
+
+  it("skips K8s PATCH for direct (non-.svc) URLs without calling fetch", async () => {
+    let called = false;
+    const neverFetch = (() => {
+      called = true;
+      return Promise.resolve({ ok: true } as Response);
+    }) as unknown as typeof fetch;
+    await wakeServer(SERVER_NAME, "http://1.2.3.4:3000", neverFetch);
+    expect(called).toBe(false);
+    expect(timeoutSpy).not.toHaveBeenCalled();
   });
 });
