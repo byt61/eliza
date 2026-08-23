@@ -1098,8 +1098,20 @@ export interface ChatOutLogParams {
 const CHAT_PREVIEW_IN_MAX = 200;
 const CHAT_PREVIEW_OUT_MAX = 120;
 
+/** Produces a bounded chat-log preview without splitting a Unicode surrogate pair. */
+function truncateChatPreview(text: string, maxLength: number): string {
+  const wellFormed = text.toWellFormed();
+  if (wellFormed.length <= maxLength) return wellFormed;
+  const boundarySplitsPair =
+    wellFormed.charCodeAt(maxLength - 1) >= 0xd800 &&
+    wellFormed.charCodeAt(maxLength - 1) <= 0xdbff &&
+    wellFormed.charCodeAt(maxLength) >= 0xdc00 &&
+    wellFormed.charCodeAt(maxLength) <= 0xdfff;
+  return wellFormed.slice(0, boundarySplitsPair ? maxLength - 1 : maxLength);
+}
+
 function escapeChatPreview(text: string): string {
-  const safe = text.length > 10_000 ? text.slice(0, 10_000) : text;
+  const safe = truncateChatPreview(text, 10_000);
   const oneLine = safe.replace(/\s+/g, " ").trim();
   return oneLine.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
@@ -1120,7 +1132,7 @@ function writeChatLine(line: string): void {
 export function logChatIn(params: ChatInLogParams): string {
   const preview = escapeChatPreview(
     params.text.length > CHAT_PREVIEW_IN_MAX
-      ? `${params.text.slice(0, CHAT_PREVIEW_IN_MAX)}...`
+      ? `${truncateChatPreview(params.text, CHAT_PREVIEW_IN_MAX)}...`
       : params.text,
   );
   const roomShort = params.roomId.slice(0, 8);
@@ -1144,7 +1156,7 @@ export function logChatOut(params: ChatOutLogParams): string {
   if (params.text !== undefined && params.text !== "") {
     const preview = escapeChatPreview(
       params.text.length > CHAT_PREVIEW_OUT_MAX
-        ? `${params.text.slice(0, CHAT_PREVIEW_OUT_MAX)}...`
+        ? `${truncateChatPreview(params.text, CHAT_PREVIEW_OUT_MAX)}...`
         : params.text,
     );
     part += ` len=${params.text.length} "${preview}"`;
@@ -1157,7 +1169,7 @@ export function logChatOut(params: ChatOutLogParams): string {
   if (params.reasoning !== undefined && params.reasoning !== "") {
     const safe = escapeChatPreview(
       params.reasoning.length > 80
-        ? `${params.reasoning.slice(0, 80)}...`
+        ? `${truncateChatPreview(params.reasoning, 80)}...`
         : params.reasoning,
     );
     part += ` reasoning="${safe}"`;

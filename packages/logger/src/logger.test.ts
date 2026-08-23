@@ -375,6 +375,42 @@ describe("logger", () => {
       '[CHAT:OUT] #agent:Eliza room=room-123 action=reply len=4 "done" providers=test-provider',
     );
   });
+
+  it("keeps Unicode previews well-formed at every chat-log truncation boundary", () => {
+    const messageAtInputBoundary = `${"a".repeat(199)}😀trailing`;
+    const messageAtOutputBoundary = `${"b".repeat(119)}😀trailing`;
+    const reasoningAtBoundary = `${"c".repeat(79)}😀trailing`;
+    const messageAtSafetyCap = `${"d".repeat(9_999)}😀trailing`;
+
+    const lines = [
+      logChatIn({
+        agentName: "Eliza",
+        agentId: "agent-1",
+        roomId: "room-123456789",
+        messageId: "message-123456789",
+        text: messageAtInputBoundary,
+      }),
+      logChatOut({
+        agentName: "Eliza",
+        agentId: "agent-1",
+        roomId: "room-123456789",
+        action: "reply",
+        text: messageAtOutputBoundary,
+        reasoning: reasoningAtBoundary,
+      }),
+      logChatOut({
+        agentName: "Eliza",
+        agentId: "agent-1",
+        roomId: "room-123456789",
+        action: "reply",
+        text: messageAtSafetyCap,
+      }),
+    ];
+
+    for (const line of lines) {
+      expect(line).toBe(line.toWellFormed());
+    }
+  });
 });
 
 // #23217: `maxMemoryLogs` on LoggerBindings must resize the shared in-memory
