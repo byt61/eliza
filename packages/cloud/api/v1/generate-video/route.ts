@@ -1,6 +1,7 @@
 /** Handles authenticated video generation, billing, and pending-job reconciliation. */
 import { Hono } from "hono";
 import { z } from "zod";
+import { toWellFormedUnicode, truncateWellFormed } from "@elizaos/core";
 import {
   admitFlatGenerativeOperation,
   asGenerativeCacheApiError,
@@ -114,6 +115,10 @@ function redactProviderErrorMessage(message: string): string {
       /\b(api[_-]?key|access[_-]?token|token|secret|authorization)=([^&\s]+)/gi,
       "$1=[REDACTED]",
     );
+}
+
+export function formatVideoProviderError(message: string): string {
+  return truncateWellFormed(toWellFormedUnicode(redactProviderErrorMessage(message)), 500);
 }
 
 function providerFailureDetails(options: {
@@ -574,7 +579,7 @@ app.post("/", async (c) => {
           provider: unknownAttempt.provider,
           prompt: unknownAttempt.prompt,
           status: "failed",
-          error: redactProviderErrorMessage(error.message).slice(0, 500),
+          error: formatVideoProviderError(error.message),
           parameters: unknownAttempt.parameters,
           metadata: { ...settlement },
           dimensions: { duration: unknownAttempt.durationSeconds },
