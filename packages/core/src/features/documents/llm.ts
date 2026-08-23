@@ -10,6 +10,7 @@
  * entry — never pulls the SDK into the frontend bundle.
  */
 import type { EmbeddingModel, ModelMessage } from "ai";
+import { ElizaError } from "../../errors";
 import { logger } from "../../logger";
 import {
 	logActiveTrajectoryLlmCall,
@@ -169,25 +170,35 @@ export async function generateTextEmbedding(
 	runtime: IAgentRuntime,
 	text: string,
 ): Promise<{ embedding: number[] }> {
-	const config = validateModelConfig(runtime);
-	const dimensions = config.EMBEDDING_DIMENSION;
-
+	let config: ReturnType<typeof validateModelConfig> | undefined;
 	try {
+		config = validateModelConfig(runtime);
+		const dimensions = config.EMBEDDING_DIMENSION;
 		if (config.EMBEDDING_PROVIDER === "local") {
-			return generateLocalEmbedding(runtime, text);
+			return await generateLocalEmbedding(runtime, text);
 		} else if (config.EMBEDDING_PROVIDER === "openai") {
-			return generateOpenAIEmbedding(text, config, dimensions);
+			return await generateOpenAIEmbedding(text, config, dimensions);
 		} else if (config.EMBEDDING_PROVIDER === "google") {
-			return generateGoogleEmbedding(text, config);
+			return await generateGoogleEmbedding(text, config);
 		}
 
 		throw new Error(
 			`Unsupported embedding provider: ${config.EMBEDDING_PROVIDER}`,
 		);
 	} catch (error) {
-		// error-policy:J2 Log provider context and preserve the embedding failure.
-		logger.error({ error }, `${config.EMBEDDING_PROVIDER} embedding error`);
-		throw error;
+		// error-policy:J2 Embedding generation is a required data path; preserve provider cause with typed error.
+		const cause = error instanceof Error ? error : new Error(String(error));
+		const provider = config?.EMBEDDING_PROVIDER ?? "unknown";
+		const wrapped = new ElizaError(`Embedding generation failed for provider ${provider}`, {
+			code: "DOCUMENT_EMBEDDING_FAILED",
+			cause,
+			context: { provider },
+		});
+		runtime.reportError("DocumentsLlm.generateTextEmbedding", wrapped, {
+			provider,
+		});
+		logger.error({ error: wrapped }, `${provider} embedding error`);
+		throw wrapped;
 	}
 }
 
@@ -369,18 +380,21 @@ export async function generateText(
 	system?: string,
 	overrideConfig?: TextGenerationOptions,
 ): Promise<TextGenerationResult> {
-	const config = validateModelConfig(runtime);
-	const provider = overrideConfig?.provider || config.TEXT_PROVIDER;
-	const modelName = overrideConfig?.modelName || config.TEXT_MODEL;
-	const maxTokens = overrideConfig?.maxTokens || config.MAX_OUTPUT_TOKENS;
-	const autoCacheContextualRetrieval =
-		overrideConfig?.autoCacheContextualRetrieval !== false;
-
-	if (!modelName) {
-		throw new Error(`No model name configured for provider: ${provider}`);
-	}
-
+	let config: ReturnType<typeof validateModelConfig> | undefined;
+	let provider: string | undefined;
+	let modelName: string | undefined;
 	try {
+		config = validateModelConfig(runtime);
+		provider = overrideConfig?.provider || config.TEXT_PROVIDER;
+		modelName = overrideConfig?.modelName || config.TEXT_MODEL;
+		const maxTokens = overrideConfig?.maxTokens || config.MAX_OUTPUT_TOKENS;
+		const autoCacheContextualRetrieval =
+			overrideConfig?.autoCacheContextualRetrieval !== false;
+
+		if (!modelName) {
+			throw new Error(`No model name configured for provider: ${provider}`);
+		}
+
 		return await withStandaloneTrajectory(
 			runtime,
 			{
@@ -437,9 +451,18 @@ export async function generateText(
 			},
 		);
 	} catch (error) {
-		// error-policy:J2 Log provider/model context and preserve the generation failure.
-		logger.error({ error }, `${provider} ${modelName} error`);
-		throw error;
+		// error-policy:J2 Text generation is a required data path; preserve provider/model cause with typed error.
+		const cause = error instanceof Error ? error : new Error(String(error));
+		const p = provider ?? "unknown";
+		const m = modelName ?? "unknown";
+		const wrapped = new ElizaError(`Text generation failed for ${p} ${m}`, {
+			code: "DOCUMENT_TEXT_GENERATION_FAILED",
+			cause,
+			context: { provider: p, modelName: m },
+		});
+		runtime.reportError("DocumentsLlm.generateText", wrapped, { provider: p, modelName: m });
+		logger.error({ error: wrapped }, `${p} ${m} error`);
+		throw wrapped;
 	}
 }
 

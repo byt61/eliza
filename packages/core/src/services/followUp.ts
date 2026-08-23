@@ -7,6 +7,7 @@
  * task worker writes a reminder memory and emits `follow_up:due` when a task fires.
  */
 import { createUniqueUuid } from "../entities";
+import { ElizaError } from "../errors";
 import { logger } from "../logger";
 import type { Memory } from "../types/memory";
 import { MemoryType } from "../types/memory";
@@ -310,12 +311,16 @@ export class FollowUpService extends Service {
 				}
 			}
 		} catch (error) {
-			// error-policy:J2 Log follow-up identity and preserve the completion failure.
-			logger.error(
-				"[FollowUpService] Error completing follow-up:",
-				error instanceof Error ? error.message : String(error),
-			);
-			throw error;
+			// error-policy:J2 Complete follow-up is a required data path; wrap the failure with task identity while preserving cause.
+			const cause = error instanceof Error ? error : new Error(String(error));
+			const wrapped = new ElizaError(`Failed to complete follow-up ${taskId}`, {
+				code: "FOLLOWUP_COMPLETE_FAILED",
+				cause,
+				context: { taskId },
+			});
+			this.runtime.reportError("FollowUpService.completeFollowUp", wrapped, { taskId });
+			logger.error({ error: wrapped, taskId }, "[FollowUpService] Error completing follow-up");
+			throw wrapped;
 		}
 
 		logger.info(`[FollowUpService] Completed follow-up task ${taskId}`);
@@ -359,12 +364,16 @@ export class FollowUpService extends Service {
 				`[FollowUpService] Snoozed follow-up ${taskId} to ${newDate.toISOString()}`,
 			);
 		} catch (error) {
-			// error-policy:J2 Log follow-up identity and preserve the snooze failure.
-			logger.error(
-				"[FollowUpService] Error snoozing follow-up:",
-				error instanceof Error ? error.message : String(error),
-			);
-			throw error;
+			// error-policy:J2 Snooze follow-up is a required data path; wrap the failure with task identity while preserving cause.
+			const cause = error instanceof Error ? error : new Error(String(error));
+			const wrapped = new ElizaError(`Failed to snooze follow-up ${taskId}`, {
+				code: "FOLLOWUP_SNOOZE_FAILED",
+				cause,
+				context: { taskId, newDate: newDate.toISOString() },
+			});
+			this.runtime.reportError("FollowUpService.snoozeFollowUp", wrapped, { taskId });
+			logger.error({ error: wrapped, taskId }, "[FollowUpService] Error snoozing follow-up");
+			throw wrapped;
 		}
 	}
 
@@ -554,12 +563,21 @@ export class FollowUpService extends Service {
 				`[FollowUpService] Executed follow-up for ${entity.names[0]}`,
 			);
 		} catch (error) {
-			// error-policy:J2 Log follow-up identity and preserve the execution failure.
-			logger.error(
-				"[FollowUpService] Error executing follow-up:",
-				error instanceof Error ? error.message : String(error),
-			);
-			throw error;
+			// error-policy:J2 Follow-up execution is a required data path; wrap the failure with task identity while preserving cause.
+			const cause = error instanceof Error ? error : new Error(String(error));
+			const taskId = task.id ?? "unknown";
+			const targetEntityId = task.metadata?.targetEntityId as string | undefined;
+			const wrapped = new ElizaError(`Failed to execute follow-up ${String(taskId)}`, {
+				code: "FOLLOWUP_EXECUTION_FAILED",
+				cause,
+				context: { taskId: String(taskId), targetEntityId },
+			});
+			runtime.reportError("FollowUpService.executeFollowUpWorker", wrapped, {
+				taskId: String(taskId),
+				targetEntityId,
+			});
+			logger.error({ error: wrapped, taskId: String(taskId) }, "[FollowUpService] Error executing follow-up");
+			throw wrapped;
 		}
 		return undefined;
 	}

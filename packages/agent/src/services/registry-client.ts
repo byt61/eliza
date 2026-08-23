@@ -9,7 +9,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { logger } from "@elizaos/core";
+import { ElizaError, logger } from "@elizaos/core";
 import { loadElizaConfig, saveElizaConfig } from "../config/config.ts";
 import { resolveStateDir } from "../config/paths.ts";
 import type { RegistryEndpoint } from "../config/types.eliza.ts";
@@ -188,12 +188,17 @@ export function getConfiguredEndpoints(): RegistryEndpoint[] {
     const cfg = loadElizaConfig();
     return cfg.plugins?.registryEndpoints ?? [];
   } catch (err) {
-    logger.warn(
-      `[registry-client] Failed to load config for custom endpoints: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return [];
+    // error-policy:J2 Config loading is a required data path; preserve the loader cause instead of returning a fabricated empty list.
+    const cause = err instanceof Error ? err : new Error(String(err));
+    const wrapped = new ElizaError("Failed to load registry endpoints config", {
+      code: "REGISTRY_ENDPOINTS_CONFIG_FAILED",
+      cause,
+      context: {},
+    });
+    logger.warn(`[registry-client] Failed to load config for custom endpoints: ${cause.message}`, {
+      error: wrapped,
+    });
+    throw wrapped;
   }
 }
 
