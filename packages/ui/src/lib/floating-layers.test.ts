@@ -1,3 +1,9 @@
+/**
+ * Unit tests for canonical floating-layer z-index scale.
+ * Validates exact boundary values, reserved gaps, and strict ordering hierarchy
+ * across content, modals, shell chrome, first-run chooser, and system diagnostic layers.
+ */
+
 import { describe, expect, it } from "vitest";
 import {
   CONFIG_SELECT_FLOATING_LAYER_NAME,
@@ -7,6 +13,7 @@ import {
   Z_DIALOG,
   Z_DIALOG_OVERLAY,
   Z_DROPDOWN,
+  Z_FIRST_RUN_CHOOSER,
   Z_GLOBAL_EMOTE,
   Z_MODAL,
   Z_MODAL_BACKDROP,
@@ -21,32 +28,59 @@ import {
 } from "./floating-layers.js";
 
 describe("floating-layers", () => {
-  it("z-index values are sparse and ordered", () => {
+  it("pins exact canonical z-index scale values", () => {
     expect(Z_BASE).toBe(0);
-    expect(Z_DROPDOWN).toBeLessThan(Z_STICKY);
-    expect(Z_STICKY).toBeLessThan(Z_MODAL_BACKDROP);
-    expect(Z_MODAL_BACKDROP).toBeLessThan(Z_MODAL);
-    expect(Z_MODAL).toBeLessThan(Z_DIALOG_OVERLAY);
-    expect(Z_DIALOG_OVERLAY).toBeLessThan(Z_DIALOG);
-    expect(Z_DIALOG).toBeLessThan(Z_OVERLAY);
-    expect(Z_OVERLAY).toBeLessThan(Z_TOOLTIP);
-    expect(Z_TOOLTIP).toBeLessThan(Z_VIEW_MODAL_BACKDROP);
-  });
-
-  it("shell and system layers are highest in app chrome", () => {
-    expect(Z_VIEW_MODAL_BACKDROP).toBeLessThan(Z_VIEW_MODAL);
-    expect(Z_VIEW_MODAL).toBeLessThan(Z_SHELL_OVERLAY);
-    expect(Z_SHELL_OVERLAY).toBeLessThan(Z_SYSTEM_BANNER);
-    expect(Z_SYSTEM_BANNER).toBeLessThan(Z_SYSTEM_CRITICAL);
-    expect(Z_SYSTEM_CRITICAL).toBeLessThan(Z_GLOBAL_EMOTE);
-    expect(Z_GLOBAL_EMOTE).toBeLessThan(Z_BUILD_BADGE);
-  });
-
-  it("config select is above app chrome but below badge", () => {
+    expect(Z_DROPDOWN).toBe(10);
+    expect(Z_STICKY).toBe(20);
+    expect(Z_MODAL_BACKDROP).toBe(50);
+    expect(Z_MODAL).toBe(100);
+    expect(Z_DIALOG_OVERLAY).toBe(160);
+    expect(Z_DIALOG).toBe(170);
+    expect(Z_OVERLAY).toBe(200);
+    expect(Z_TOOLTIP).toBe(300);
+    expect(Z_VIEW_MODAL_BACKDROP).toBe(8800);
+    expect(Z_VIEW_MODAL).toBe(8810);
+    expect(Z_SHELL_OVERLAY).toBe(9000);
+    expect(Z_FIRST_RUN_CHOOSER).toBe(9400);
+    expect(Z_SYSTEM_BANNER).toBe(9998);
+    expect(Z_SYSTEM_CRITICAL).toBe(9999);
+    expect(Z_GLOBAL_EMOTE).toBe(11000);
+    expect(CONFIG_SELECT_FLOATING_LAYER_Z_INDEX).toBe(12000);
+    expect(Z_BUILD_BADGE).toBe(13000);
     expect(CONFIG_SELECT_FLOATING_LAYER_NAME).toBe("config-select");
-    expect(CONFIG_SELECT_FLOATING_LAYER_Z_INDEX).toBeGreaterThan(
+  });
+
+  it("enforces strict ascending ordering across full canonical chain", () => {
+    const scale = [
+      Z_BASE,
+      Z_DROPDOWN,
+      Z_STICKY,
+      Z_MODAL_BACKDROP,
+      Z_MODAL,
+      Z_DIALOG_OVERLAY,
+      Z_DIALOG,
+      Z_OVERLAY,
+      Z_TOOLTIP,
+      Z_VIEW_MODAL_BACKDROP,
+      Z_VIEW_MODAL,
+      Z_SHELL_OVERLAY,
+      Z_FIRST_RUN_CHOOSER,
+      Z_SYSTEM_BANNER,
+      Z_SYSTEM_CRITICAL,
       Z_GLOBAL_EMOTE,
-    );
-    expect(CONFIG_SELECT_FLOATING_LAYER_Z_INDEX).toBeLessThan(Z_BUILD_BADGE);
+      CONFIG_SELECT_FLOATING_LAYER_Z_INDEX,
+      Z_BUILD_BADGE,
+    ];
+
+    for (let i = 0; i < scale.length - 1; i++) {
+      expect(scale[i]).toBeLessThan(scale[i + 1]);
+      // Verify reserved gap spacing between tiers
+      expect(scale[i + 1] - scale[i]).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("first-run chooser sits between shell overlay and system banner", () => {
+    expect(Z_FIRST_RUN_CHOOSER).toBeGreaterThan(Z_SHELL_OVERLAY);
+    expect(Z_FIRST_RUN_CHOOSER).toBeLessThan(Z_SYSTEM_BANNER);
   });
 });
