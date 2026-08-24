@@ -3,7 +3,7 @@
  * error messages, keys, and cause encapsulation.
  */
 import { describe, expect, it } from "vitest";
-import { VaultDecryptionError, VaultMissError } from "./vault-types.ts";
+import { VaultDecryptionError, VaultMissError } from "../src/vault-types";
 
 describe("vault-types", () => {
   describe("VaultMissError", () => {
