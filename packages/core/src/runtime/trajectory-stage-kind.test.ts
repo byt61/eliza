@@ -2,18 +2,20 @@
  * Tests for trajectory-stage-kind — verifies the canonical semantic stage-kind
  * vocabulary is complete and stable for trajectory producers and transports.
  */
-import { describe, expect, it } from "vitest";
-import type { RecordedStageKind } from "./trajectory-stage-kind.ts";
-import { RECORDED_STAGE_KINDS } from "./trajectory-stage-kind.ts";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import {
+	RECORDED_STAGE_KINDS,
+	type RecordedStageKind,
+} from "./trajectory-stage-kind.ts";
 
 describe("trajectory-stage-kind", () => {
-	it("exports RECORDED_STAGE_KINDS as readonly tuple", () => {
+	it("exports RECORDED_STAGE_KINDS as an array", () => {
 		expect(Array.isArray(RECORDED_STAGE_KINDS)).toBe(true);
-		expect(RECORDED_STAGE_KINDS.length).toBe(8);
+		expect(RECORDED_STAGE_KINDS).toHaveLength(8);
 	});
 
-	it("contains expected stage kinds in order", () => {
-		expect([...RECORDED_STAGE_KINDS]).toEqual([
+	it("contains expected stage kinds in canonical order", () => {
+		expect(RECORDED_STAGE_KINDS).toEqual([
 			"messageHandler",
 			"planner",
 			"tool",
@@ -25,9 +27,42 @@ describe("trajectory-stage-kind", () => {
 		]);
 	});
 
-	it("RecordedStageKind type is assignable from each entry", () => {
-		const sample: RecordedStageKind = RECORDED_STAGE_KINDS[0];
-		expect(typeof sample).toBe("string");
+	it("derives RecordedStageKind union from exported literals", () => {
+		expectTypeOf<RecordedStageKind>().toEqualTypeOf<
+			(typeof RECORDED_STAGE_KINDS)[number]
+		>();
+		expectTypeOf<RecordedStageKind>().toEqualTypeOf<
+			| "messageHandler"
+			| "planner"
+			| "tool"
+			| "toolSearch"
+			| "evaluation"
+			| "subPlanner"
+			| "compaction"
+			| "factsAndRelationships"
+		>();
+	});
+
+	it("accepts valid stage kinds and rejects invalid vocabulary", () => {
+		const validKinds: readonly RecordedStageKind[] = [
+			"messageHandler",
+			"planner",
+			"tool",
+			"toolSearch",
+			"evaluation",
+			"subPlanner",
+			"compaction",
+			"factsAndRelationships",
+		];
+		const stageSet = new Set<string>(RECORDED_STAGE_KINDS);
+
+		for (const kind of validKinds) {
+			expect(stageSet.has(kind)).toBe(true);
+		}
+
+		expect(stageSet.has("unknown")).toBe(false);
+		expect(stageSet.has("invalidKind")).toBe(false);
+		expect(stageSet.has("")).toBe(false);
 	});
 
 	it("contains no duplicates", () => {
@@ -40,13 +75,5 @@ describe("trajectory-stage-kind", () => {
 			expect(typeof kind).toBe("string");
 			expect(kind.length).toBeGreaterThan(0);
 		}
-	});
-
-	it("is frozen as const (readonly)", () => {
-		// as const makes array readonly; runtime array is still extensible but type is readonly
-		expect(
-			Object.isFrozen(RECORDED_STAGE_KINDS) ||
-				Array.isArray(RECORDED_STAGE_KINDS),
-		).toBe(true);
 	});
 });
