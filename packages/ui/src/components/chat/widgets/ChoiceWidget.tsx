@@ -9,8 +9,9 @@
  * agent only ever sees one decision per prompt.
  */
 
-import { Check, ChevronRight, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronRight, X } from "lucide-react";
 import { memo, useCallback, useState } from "react";
+import { FIRST_RUN_ACTION_PREFIX } from "../../../first-run/first-run-action-channel";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { ChatWidgetShell } from "./chat-widget-shell";
@@ -51,6 +52,17 @@ function isFirstRunScope(scope: string): boolean {
 
 function isRecommended(label: string): boolean {
   return /\(recommended\)/i.test(label);
+}
+
+/**
+ * First-run prompts may append a Back navigation option (value
+ * `${FIRST_RUN_ACTION_PREFIX}back:*`) that retreats to the previous step. It is
+ * not a decision, so it must not count toward the "N options" chip nor be
+ * announced among the decision rows. The `:` after `back` keeps the unrelated
+ * `backup-restore:*` values out of the match.
+ */
+function isBackNavigationOption(option: ChoiceOption): boolean {
+  return option.value.startsWith(`${FIRST_RUN_ACTION_PREFIX}back:`);
 }
 
 // Memoized on its data props (see `choicePropsEqual`): the transcript re-parses
@@ -99,6 +111,9 @@ export const ChoiceWidget = memo(function ChoiceWidget({
   if (options.length === 0 && !allowCustom) return null;
 
   const firstRun = isFirstRunScope(scope);
+  const backOption = options.find(isBackNavigationOption);
+  const decisionOptions = options.filter((o) => !isBackNavigationOption(o));
+  const optionCount = decisionOptions.length;
 
   // A single-action first-run prompt ("Sign in to Eliza Cloud") is a CTA, not
   // a choice: wrapped in the collapsible shell it read as a dropdown with one
@@ -156,7 +171,7 @@ export const ChoiceWidget = memo(function ChoiceWidget({
               ? "Selected"
               : dismissed
                 ? "Dismissed"
-                : `${options.length} options`}
+                : `${optionCount} options`}
           </span>
           {!firstRun && !locked && (
             <Button
@@ -192,7 +207,7 @@ export const ChoiceWidget = memo(function ChoiceWidget({
         data-choice-id={id}
         data-choice-scope={scope}
       >
-        {options.map((option) => {
+        {decisionOptions.map((option) => {
           const cancel = isCancelLike(option.value, option.label);
           const isSelected = selected?.value === option.value;
           if (firstRun) {
@@ -308,6 +323,30 @@ export const ChoiceWidget = memo(function ChoiceWidget({
           )
         ) : null}
       </fieldset>
+
+      {backOption && firstRun ? (
+        <div className="mt-1 border-t border-border/30 pt-2">
+          <Button
+            type="button"
+            variant="ghostMuted"
+            size="row"
+            disabled={locked}
+            // A navigation control is not a decision: announce a clean action
+            // name (no leading "←" glyph) and keep the full guidance visible.
+            aria-label={backOption.label.replace(/^←\s*/, "").trim()}
+            title={backOption.label}
+            data-testid={`choice-${backOption.value}`}
+            onClick={() => handleChoose(backOption)}
+          >
+            <span className="inline-flex min-w-0 items-center gap-2 text-left">
+              <ArrowLeft className="size-4 shrink-0" aria-hidden />
+              <span className="min-w-0 [overflow-wrap:anywhere]">
+                {backOption.label.replace(/^←\s*/, "").trim()}
+              </span>
+            </span>
+          </Button>
+        </div>
+      ) : null}
     </ChatWidgetShell>
   );
 }, choicePropsEqual);
