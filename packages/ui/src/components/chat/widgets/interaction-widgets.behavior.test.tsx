@@ -451,6 +451,92 @@ describe("ChoiceWidget — pick an option", () => {
     expect(recommended.className).toContain("disabled:opacity-40");
     expect(onChoose).toHaveBeenCalledWith("local");
   });
+
+  it("first-run: the Back control is excluded from the option count and announces a clean action name", () => {
+    render(
+      <ChoiceWidget
+        id="provider"
+        scope="first-run"
+        options={[
+          {
+            value: "__first_run__:provider:on-device",
+            label: "On this device",
+          },
+          {
+            value: "__first_run__:provider:elizacloud",
+            label: "Eliza Cloud inference",
+          },
+          {
+            value: "__first_run__:back:runtime",
+            label: "← Back — change where your agent runs",
+          },
+        ]}
+        onChoose={vi.fn()}
+      />,
+    );
+
+    // Two decisions + one Back nav → the count chip says 2, not 3.
+    expect(screen.getByText("2 options")).toBeTruthy();
+    expect(screen.queryByText("3 options")).toBeNull();
+
+    // Accessible/visible name drops the leading "←" glyph.
+    const back = screen.getByRole("button", {
+      name: "Back — change where your agent runs",
+    });
+    expect(back).toBeTruthy();
+    expect(back.textContent).not.toContain("←");
+  });
+
+  it("first-run: clicking Back reports the reserved back value, not a chat send", () => {
+    const onChoose = vi.fn();
+    render(
+      <ChoiceWidget
+        id="provider"
+        scope="first-run"
+        options={[
+          {
+            value: "__first_run__:provider:on-device",
+            label: "On this device",
+          },
+          { value: "__first_run__:back:runtime", label: "← Back" },
+        ]}
+        onChoose={onChoose}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("choice-__first_run__:back:runtime"));
+    expect(onChoose).toHaveBeenCalledWith("__first_run__:back:runtime");
+  });
+
+  it("keeps backup-restore (not back:) as a regular decision option", () => {
+    const onChoose = vi.fn();
+    render(
+      <ChoiceWidget
+        id="restore"
+        scope="first-run"
+        options={[
+          {
+            value: "__first_run__:backup-restore:latest",
+            label: "Restore latest backup",
+          },
+          {
+            value: "__first_run__:backup-restore:start-fresh",
+            label: "Start fresh",
+          },
+        ]}
+        onChoose={onChoose}
+      />,
+    );
+
+    // Both are decisions — both count and both are clickable rows.
+    expect(screen.getByText("2 options")).toBeTruthy();
+    fireEvent.click(
+      screen.getByTestId("choice-__first_run__:backup-restore:latest"),
+    );
+    expect(onChoose).toHaveBeenCalledWith(
+      "__first_run__:backup-restore:latest",
+    );
+  });
 });
 
 describe("ChoiceWidget — put their own in (allowCustom)", () => {
